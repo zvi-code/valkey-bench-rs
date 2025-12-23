@@ -50,10 +50,7 @@ pub fn create_index(
     args.push(b"VECTOR");
 
     // Algorithm-specific parameters
-    let algo_str = match config.algorithm {
-        crate::config::VectorAlgorithm::Hnsw => "HNSW",
-        crate::config::VectorAlgorithm::Flat => "FLAT",
-    };
+    let algo_str = config.algorithm.as_str();
     args.push(algo_str.as_bytes());
 
     // Calculate number of attribute pairs (each pair = 2 args)
@@ -78,11 +75,7 @@ pub fn create_index(
     let dim_str = config.dim.to_string();
     args.push(dim_str.as_bytes());
     args.push(b"DISTANCE_METRIC");
-    let metric_str = match config.distance_metric {
-        crate::config::DistanceMetric::L2 => "L2",
-        crate::config::DistanceMetric::InnerProduct => "IP",
-        crate::config::DistanceMetric::Cosine => "COSINE",
-    };
+    let metric_str = config.distance_metric.as_str();
     args.push(metric_str.as_bytes());
 
     // HNSW-specific parameters

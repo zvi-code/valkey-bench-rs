@@ -3,10 +3,17 @@
 //! Parses FT.INFO responses from different engine types:
 //! - EC (ElastiCache Valkey) - uses flat key-value pairs
 //! - MemoryDB - uses nested RESP3 structures
+//!
+//! This module provides a unified trait-based approach for handling
+//! engine-specific differences in backfill progress detection.
 
 use std::collections::HashMap;
 
 use crate::utils::RespValue;
+
+// ============================================================================
+// Engine Type
+// ============================================================================
 
 /// Engine type for determining response format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,29 +33,96 @@ pub enum EngineType {
 impl EngineType {
     /// Detect engine type from server info
     pub fn detect(info_response: &str) -> Self {
-        // Check for MemoryDB specific indicators
         if info_response.contains("memorydb") || info_response.contains("MemoryDB") {
             return EngineType::MemoryDb;
         }
-
-        // Check for ElastiCache indicators
         if info_response.contains("elasticache") || info_response.contains("ElastiCache") {
             if info_response.contains("serverless") {
                 return EngineType::ElasticacheServerless;
             }
             return EngineType::ElasticacheValkey;
         }
-
-        // Check for valkey-search module (EC Valkey)
         if info_response.contains("valkey-search") || info_response.contains("search_") {
             return EngineType::ElasticacheValkey;
         }
-
         EngineType::OssValkey
+    }
+
+    pub fn is_memorydb(&self) -> bool {
+        matches!(self, EngineType::MemoryDb)
     }
 }
 
-/// Helper to get string from RespValue
+// ============================================================================
+// Response Format
+// ============================================================================
+
+/// Response format for FT.INFO parsing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseFormat {
+    /// EC format: flat key-value pairs with nested arrays
+    ElastiCache,
+    /// MemoryDB format: strict key-value pairs (step by 2)
+    MemoryDb,
+}
+
+impl From<EngineType> for ResponseFormat {
+    fn from(engine: EngineType) -> Self {
+        match engine {
+            EngineType::MemoryDb => ResponseFormat::MemoryDb,
+            _ => ResponseFormat::ElastiCache,
+        }
+    }
+}
+
+// ============================================================================
+// Field Definitions (Centralized)
+// ============================================================================
+
+/// Centralized field definitions for FT.INFO
+pub mod fields {
+    /// EC field names
+    pub mod ec {
+        pub const INDEX_NAME: &str = "index_name";
+        pub const STATE: &str = "state";
+        pub const NUM_DOCS: &str = "num_docs";
+        pub const NUM_INDEXED_VECTORS: &str = "num_indexed_vectors";
+        pub const BACKFILL_IN_PROGRESS: &str = "backfill_in_progress";
+        pub const BACKFILL_COMPLETE_PERCENT: &str = "backfill_complete_percent";
+        pub const SPACE_USAGE: &str = "space_usage";
+        pub const VECTOR_SPACE_USAGE: &str = "vector_space_usage";
+    }
+
+    /// MemoryDB field names
+    pub mod memdb {
+        pub const INDEX_NAME: &str = "index_name";
+        pub const INDEX_STATUS: &str = "index_status";
+        pub const NUM_DOCS: &str = "num_docs";
+        pub const NUM_INDEXED_VECTORS: &str = "num_indexed_vectors";
+        pub const INDEX_DEGRADATION_PERCENTAGE: &str = "index_degradation_percentage";
+        pub const SPACE_USAGE: &str = "space_usage";
+        pub const VECTOR_SPACE_USAGE: &str = "vector_space_usage";
+        pub const CURRENT_LAG: &str = "current_lag";
+    }
+
+    /// INFO SEARCH field names (MemoryDB)
+    pub mod search_info {
+        pub const NUM_ACTIVE_BACKFILLS: &str = "search_num_active_backfills";
+        pub const BACKFILL_PROGRESS_PERCENTAGE: &str = "search_current_backfill_progress_percentage";
+    }
+
+    /// Required fields for MemoryDB FT.INFO validation
+    pub const REQUIRED_MEMDB_FTINFO: &[&str] = &[
+        memdb::INDEX_STATUS,
+        memdb::INDEX_DEGRADATION_PERCENTAGE,
+        memdb::NUM_INDEXED_VECTORS,
+    ];
+}
+
+// ============================================================================
+// RESP Response Parsing
+// ============================================================================
+
 fn resp_to_string(value: &RespValue) -> Option<String> {
     match value {
         RespValue::SimpleString(s) => Some(s.clone()),
@@ -57,22 +131,19 @@ fn resp_to_string(value: &RespValue) -> Option<String> {
     }
 }
 
-/// Convert FT.INFO RESP response to key:value lines (EC format)
-///
-/// EC format uses alternating key-value pairs in arrays:
-/// ```text
-/// 1) "index_name"
-/// 2) "my-index"
-/// 3) "num_docs"
-/// 4) (integer) 1000
-/// ```
-pub fn convert_ftinfo_to_lines(reply: &RespValue, prefix: Option<&str>) -> String {
+/// Convert FT.INFO RESP response to key:value lines
+pub fn convert_ftinfo_to_lines(reply: &RespValue, format: ResponseFormat) -> String {
     let mut lines = String::new();
-    convert_ftinfo_recursive(reply, prefix, &mut lines);
+    convert_recursive(reply, None, &mut lines, format);
     lines
 }
 
-fn convert_ftinfo_recursive(reply: &RespValue, prefix: Option<&str>, lines: &mut String) {
+fn convert_recursive(
+    reply: &RespValue,
+    prefix: Option<&str>,
+    lines: &mut String,
+    format: ResponseFormat,
+) {
     match reply {
         RespValue::SimpleString(s) => {
             if let Some(p) = prefix {
@@ -91,189 +162,160 @@ fn convert_ftinfo_recursive(reply: &RespValue, prefix: Option<&str>, lines: &mut
                 lines.push_str(&format!("{}:{}\n", p, i));
             }
         }
-        RespValue::Array(elements) => {
-            // Process as key-value pairs
-            let mut i = 0;
-            while i < elements.len() {
-                let element = &elements[i];
-
-                // Check if this element is a nested array
-                if let RespValue::Array(_) = element {
-                    convert_ftinfo_recursive(element, prefix, lines);
-                    i += 1;
-                    continue;
-                }
-
-                // Last element without a value
-                if i == elements.len() - 1 {
-                    if let Some(s) = resp_to_string(element) {
-                        if let Some(p) = prefix {
-                            lines.push_str(&format!("{}:{}\n", p, s));
-                        }
-                    } else if let RespValue::Integer(n) = element {
-                        if let Some(p) = prefix {
-                            lines.push_str(&format!("{}:{}\n", p, n));
-                        }
-                    }
-                    break;
-                }
-
-                // Get key name
-                let key_name = match resp_to_string(element) {
-                    Some(s) => s,
-                    None => {
-                        i += 1;
-                        continue;
-                    }
-                };
-
-                // Build full key with prefix
-                let full_key = match prefix {
-                    Some(p) => format!("{}.{}", p, key_name),
-                    None => key_name,
-                };
-
-                i += 1;
-                if i >= elements.len() {
-                    break;
-                }
-
-                let value = &elements[i];
-                if let Some(s) = resp_to_string(value) {
-                    lines.push_str(&format!("{}:{}\n", full_key, s));
-                } else if let RespValue::Integer(n) = value {
-                    lines.push_str(&format!("{}:{}\n", full_key, n));
-                } else if let RespValue::Array(_) = value {
-                    // Nested array - recurse with new prefix
-                    convert_ftinfo_recursive(value, Some(&full_key), lines);
-                }
-
-                i += 1;
-            }
-        }
+        RespValue::Array(elements) => match format {
+            ResponseFormat::ElastiCache => convert_ec_array(elements, prefix, lines, format),
+            ResponseFormat::MemoryDb => convert_memdb_array(elements, prefix, lines, format),
+        },
         _ => {}
     }
 }
 
-/// Convert FT.INFO RESP response to key:value lines (MemoryDB format)
-///
-/// MemoryDB format uses RESP3 maps with nested structures:
-/// ```text
-/// 1) index_name
-/// 2) "gist-960-1M-960-100"
-/// 3) fields
-/// 4) 1) 1) identifier
-///       2) vector_field
-///       ...
-/// ```
-pub fn convert_memdb_ftinfo_to_lines(reply: &RespValue, prefix: Option<&str>) -> String {
-    let mut lines = String::new();
-    convert_memdb_recursive(reply, prefix, &mut lines);
-    lines
-}
+fn convert_ec_array(
+    elements: &[RespValue],
+    prefix: Option<&str>,
+    lines: &mut String,
+    format: ResponseFormat,
+) {
+    let mut i = 0;
+    while i < elements.len() {
+        let element = &elements[i];
 
-fn convert_memdb_recursive(reply: &RespValue, prefix: Option<&str>, lines: &mut String) {
-    match reply {
-        RespValue::SimpleString(s) => {
-            if let Some(p) = prefix {
-                lines.push_str(&format!("{}:{}\n", p, s));
-            }
+        if let RespValue::Array(_) = element {
+            convert_recursive(element, prefix, lines, format);
+            i += 1;
+            continue;
         }
-        RespValue::BulkString(bytes) => {
-            if let Some(p) = prefix {
-                if let Ok(s) = std::str::from_utf8(bytes) {
+
+        if i == elements.len() - 1 {
+            if let Some(s) = resp_to_string(element) {
+                if let Some(p) = prefix {
                     lines.push_str(&format!("{}:{}\n", p, s));
                 }
+            } else if let RespValue::Integer(n) = element {
+                if let Some(p) = prefix {
+                    lines.push_str(&format!("{}:{}\n", p, n));
+                }
             }
+            break;
         }
-        RespValue::Integer(i) => {
-            if let Some(p) = prefix {
-                lines.push_str(&format!("{}:{}\n", p, i));
+
+        let key_name = match resp_to_string(element) {
+            Some(s) => s,
+            None => {
+                i += 1;
+                continue;
             }
+        };
+
+        let full_key = match prefix {
+            Some(p) => format!("{}.{}", p, key_name),
+            None => key_name,
+        };
+
+        i += 1;
+        if i >= elements.len() {
+            break;
         }
-        RespValue::Array(elements) => {
-            // Process as key-value pairs (step by 2)
-            let mut i = 0;
-            while i + 1 < elements.len() {
-                let key_elem = &elements[i];
-                let val_elem = &elements[i + 1];
 
-                // Key should be a string
-                let key_name = match resp_to_string(key_elem) {
-                    Some(s) => s,
-                    None => {
-                        i += 2;
-                        continue;
-                    }
-                };
+        let value = &elements[i];
+        if let Some(s) = resp_to_string(value) {
+            lines.push_str(&format!("{}:{}\n", full_key, s));
+        } else if let RespValue::Integer(n) = value {
+            lines.push_str(&format!("{}:{}\n", full_key, n));
+        } else if let RespValue::Array(_) = value {
+            convert_recursive(value, Some(&full_key), lines, format);
+        }
 
-                // Build full key with prefix
-                let full_key = match prefix {
-                    Some(p) => format!("{}.{}", p, key_name),
-                    None => key_name,
-                };
+        i += 1;
+    }
+}
 
-                if let Some(s) = resp_to_string(val_elem) {
-                    lines.push_str(&format!("{}:{}\n", full_key, s));
-                } else if let RespValue::Integer(n) = val_elem {
-                    lines.push_str(&format!("{}:{}\n", full_key, n));
-                } else if let RespValue::Array(sub_elements) = val_elem {
-                    if sub_elements.is_empty() {
-                        i += 2;
-                        continue;
-                    }
+fn convert_memdb_array(
+    elements: &[RespValue],
+    prefix: Option<&str>,
+    lines: &mut String,
+    format: ResponseFormat,
+) {
+    let mut i = 0;
+    while i + 1 < elements.len() {
+        let key_elem = &elements[i];
+        let val_elem = &elements[i + 1];
 
-                    // Check first element to determine structure
-                    let first = &sub_elements[0];
-                    match first {
-                        // If first element is an array, it's a list of objects (like fields)
-                        RespValue::Array(_) => {
-                            for sub in sub_elements {
-                                convert_memdb_recursive(sub, Some(&full_key), lines);
-                            }
-                        }
-                        // If it's a string and we have even elements, it's key-value pairs
-                        RespValue::SimpleString(_) | RespValue::BulkString(_)
-                            if sub_elements.len() % 2 == 0 =>
-                        {
-                            convert_memdb_recursive(val_elem, Some(&full_key), lines);
-                        }
-                        // Otherwise it's a simple list - take first value
-                        _ => {
-                            if let Some(s) = resp_to_string(first) {
-                                lines.push_str(&format!("{}:{}\n", full_key, s));
-                            } else if let RespValue::Integer(n) = first {
-                                lines.push_str(&format!("{}:{}\n", full_key, n));
-                            }
-                        }
+        let key_name = match resp_to_string(key_elem) {
+            Some(s) => s,
+            None => {
+                i += 2;
+                continue;
+            }
+        };
+
+        let full_key = match prefix {
+            Some(p) => format!("{}.{}", p, key_name),
+            None => key_name,
+        };
+
+        if let Some(s) = resp_to_string(val_elem) {
+            lines.push_str(&format!("{}:{}\n", full_key, s));
+        } else if let RespValue::Integer(n) = val_elem {
+            lines.push_str(&format!("{}:{}\n", full_key, n));
+        } else if let RespValue::Array(sub_elements) = val_elem {
+            if sub_elements.is_empty() {
+                i += 2;
+                continue;
+            }
+
+            let first = &sub_elements[0];
+            match first {
+                RespValue::Array(_) => {
+                    for sub in sub_elements {
+                        convert_recursive(sub, Some(&full_key), lines, format);
                     }
                 }
-
-                i += 2;
+                RespValue::SimpleString(_) | RespValue::BulkString(_)
+                    if sub_elements.len() % 2 == 0 =>
+                {
+                    convert_recursive(val_elem, Some(&full_key), lines, format);
+                }
+                _ => {
+                    if let Some(s) = resp_to_string(first) {
+                        lines.push_str(&format!("{}:{}\n", full_key, s));
+                    } else if let RespValue::Integer(n) = first {
+                        lines.push_str(&format!("{}:{}\n", full_key, n));
+                    }
+                }
             }
         }
-        _ => {}
+
+        i += 2;
     }
 }
 
 /// Parse FT.INFO lines into a HashMap
 pub fn parse_ftinfo_lines(lines: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in lines.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            map.insert(key.to_string(), value.to_string());
-        }
-    }
-    map
+    lines
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
-/// Extract a specific field value from parsed FT.INFO
-pub fn get_ftinfo_field<T: std::str::FromStr>(
-    info: &HashMap<String, String>,
-    field: &str,
-) -> Option<T> {
+/// Extract a typed field value from parsed info
+pub fn get_field<T: std::str::FromStr>(info: &HashMap<String, String>, field: &str) -> Option<T> {
     info.get(field)?.parse().ok()
 }
+
+/// Extract a typed field with default value
+pub fn get_field_or<T: std::str::FromStr>(
+    info: &HashMap<String, String>,
+    field: &str,
+    default: T,
+) -> T {
+    get_field(info, field).unwrap_or(default)
+}
+
+// ============================================================================
+// Index Status
+// ============================================================================
 
 /// Index status from FT.INFO
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,58 +340,119 @@ impl IndexStatus {
     pub fn is_in_progress(&self) -> bool {
         matches!(self, IndexStatus::Backfilling | IndexStatus::Queued)
     }
+
+    pub fn is_available(&self) -> bool {
+        matches!(self, IndexStatus::Available)
+    }
 }
 
-/// Parsed FT.INFO result
+// ============================================================================
+// Validation
+// ============================================================================
+
+/// Validation error for FT.INFO response
+#[derive(Debug, Clone)]
+pub struct ValidationError {
+    pub message: String,
+    pub missing_field: Option<String>,
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
+/// Validate FT.INFO response has required fields for MemoryDB
+pub fn validate_memdb_ftinfo(raw: &HashMap<String, String>) -> Result<(), ValidationError> {
+    for &field in fields::REQUIRED_MEMDB_FTINFO {
+        if !raw.contains_key(field) {
+            return Err(ValidationError {
+                message: format!("Missing required field '{}' in FT.INFO response", field),
+                missing_field: Some(field.to_string()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate INFO SEARCH response has required fields
+pub fn validate_search_info(
+    search_info: &HashMap<String, String>,
+    active_backfills: i32,
+) -> Result<(), ValidationError> {
+    if !search_info.contains_key(fields::search_info::NUM_ACTIVE_BACKFILLS) {
+        return Err(ValidationError {
+            message: format!(
+                "Missing required field '{}' in INFO SEARCH response",
+                fields::search_info::NUM_ACTIVE_BACKFILLS
+            ),
+            missing_field: Some(fields::search_info::NUM_ACTIVE_BACKFILLS.to_string()),
+        });
+    }
+
+    if active_backfills > 0
+        && !search_info.contains_key(fields::search_info::BACKFILL_PROGRESS_PERCENTAGE)
+    {
+        return Err(ValidationError {
+            message: format!(
+                "Missing '{}' with {} active backfills",
+                fields::search_info::BACKFILL_PROGRESS_PERCENTAGE,
+                active_backfills
+            ),
+            missing_field: Some(fields::search_info::BACKFILL_PROGRESS_PERCENTAGE.to_string()),
+        });
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Parsed FT.INFO Result
+// ============================================================================
+
+/// Parsed FT.INFO result (unified for all engine types)
 #[derive(Debug, Clone)]
 pub struct FtInfoResult {
-    /// Index name
     pub index_name: Option<String>,
-    /// Number of documents
     pub num_docs: i64,
-    /// Number of indexed vectors (MemoryDB)
     pub num_indexed_vectors: i64,
-    /// Index status
     pub status: IndexStatus,
-    /// Index degradation percentage (MemoryDB)
     pub degradation_percentage: i32,
-    /// Backfill in progress (EC)
     pub backfill_in_progress: bool,
-    /// Backfill complete percent (EC)
     pub backfill_complete_percent: f64,
-    /// Space usage bytes
     pub space_usage: i64,
-    /// Vector space usage bytes
     pub vector_space_usage: i64,
-    /// Current lag (MemoryDB)
     pub current_lag: i64,
-    /// Raw parsed lines
     pub raw: HashMap<String, String>,
 }
 
 impl FtInfoResult {
     /// Parse from EC format response
     pub fn from_ec_response(reply: &RespValue) -> Self {
-        let lines = convert_ftinfo_to_lines(reply, None);
+        let lines = convert_ftinfo_to_lines(reply, ResponseFormat::ElastiCache);
         let raw = parse_ftinfo_lines(&lines);
 
-        let backfill_in_progress: i32 = get_ftinfo_field(&raw, "backfill_in_progress").unwrap_or(0);
+        // C code defaults backfill_complete_percent to 0.0 when field is missing
+        let backfill_in_progress: i32 = get_field_or(&raw, fields::ec::BACKFILL_IN_PROGRESS, 0);
         let backfill_complete_percent: f64 =
-            get_ftinfo_field(&raw, "backfill_complete_percent").unwrap_or(1.0);
+            get_field_or(&raw, fields::ec::BACKFILL_COMPLETE_PERCENT, 0.0);
 
         Self {
-            index_name: raw.get("index_name").cloned(),
-            num_docs: get_ftinfo_field(&raw, "num_docs").unwrap_or(0),
-            num_indexed_vectors: get_ftinfo_field(&raw, "num_indexed_vectors").unwrap_or(0),
+            index_name: raw.get(fields::ec::INDEX_NAME).cloned(),
+            num_docs: get_field_or(&raw, fields::ec::NUM_DOCS, 0),
+            num_indexed_vectors: get_field_or(&raw, fields::ec::NUM_INDEXED_VECTORS, 0),
             status: raw
-                .get("state")
+                .get(fields::ec::STATE)
                 .map(|s| IndexStatus::from_str(s))
                 .unwrap_or(IndexStatus::Available),
             degradation_percentage: 0,
             backfill_in_progress: backfill_in_progress != 0,
             backfill_complete_percent,
-            space_usage: get_ftinfo_field(&raw, "space_usage").unwrap_or(0),
-            vector_space_usage: get_ftinfo_field(&raw, "vector_space_usage").unwrap_or(0),
+            space_usage: get_field_or(&raw, fields::ec::SPACE_USAGE, 0),
+            vector_space_usage: get_field_or(&raw, fields::ec::VECTOR_SPACE_USAGE, 0),
             current_lag: 0,
             raw,
         }
@@ -357,24 +460,27 @@ impl FtInfoResult {
 
     /// Parse from MemoryDB format response
     pub fn from_memdb_response(reply: &RespValue) -> Self {
-        let lines = convert_memdb_ftinfo_to_lines(reply, None);
+        let lines = convert_ftinfo_to_lines(reply, ResponseFormat::MemoryDb);
         let raw = parse_ftinfo_lines(&lines);
 
         Self {
-            index_name: raw.get("index_name").cloned(),
-            num_docs: get_ftinfo_field(&raw, "num_docs").unwrap_or(0),
-            num_indexed_vectors: get_ftinfo_field(&raw, "num_indexed_vectors").unwrap_or(0),
+            index_name: raw.get(fields::memdb::INDEX_NAME).cloned(),
+            num_docs: get_field_or(&raw, fields::memdb::NUM_DOCS, 0),
+            num_indexed_vectors: get_field_or(&raw, fields::memdb::NUM_INDEXED_VECTORS, 0),
             status: raw
-                .get("index_status")
+                .get(fields::memdb::INDEX_STATUS)
                 .map(|s| IndexStatus::from_str(s))
                 .unwrap_or(IndexStatus::Available),
-            degradation_percentage: get_ftinfo_field(&raw, "index_degradation_percentage")
-                .unwrap_or(0),
+            degradation_percentage: get_field_or(
+                &raw,
+                fields::memdb::INDEX_DEGRADATION_PERCENTAGE,
+                0,
+            ),
             backfill_in_progress: false,
             backfill_complete_percent: 100.0,
-            space_usage: get_ftinfo_field(&raw, "space_usage").unwrap_or(0),
-            vector_space_usage: get_ftinfo_field(&raw, "vector_space_usage").unwrap_or(0),
-            current_lag: get_ftinfo_field(&raw, "current_lag").unwrap_or(0),
+            space_usage: get_field_or(&raw, fields::memdb::SPACE_USAGE, 0),
+            vector_space_usage: get_field_or(&raw, fields::memdb::VECTOR_SPACE_USAGE, 0),
+            current_lag: get_field_or(&raw, fields::memdb::CURRENT_LAG, 0),
             raw,
         }
     }
@@ -387,34 +493,47 @@ impl FtInfoResult {
         }
     }
 
-    /// Check if index is ready (not backfilling/degraded)
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
     pub fn is_ready(&self) -> bool {
         self.status == IndexStatus::Available
             && self.degradation_percentage == 0
             && !self.backfill_in_progress
     }
 
-    /// Get progress percentage (0-100)
-    pub fn progress_percent(&self) -> i32 {
-        if self.is_ready() {
-            return 100;
-        }
-
-        if self.backfill_in_progress {
-            return (self.backfill_complete_percent * 100.0) as i32;
-        }
-
-        if self.degradation_percentage > 0 {
-            return 100 - self.degradation_percentage;
-        }
-
-        if self.status == IndexStatus::Backfilling {
-            return 0;
-        }
-
-        100
+    /// Get progress percentage for EC format (0-100)
+    pub fn ec_progress_percent(&self) -> i32 {
+        (self.backfill_complete_percent * 100.0) as i32
     }
 }
+
+// ============================================================================
+// Legacy compatibility (deprecated)
+// ============================================================================
+
+#[deprecated(note = "Use convert_ftinfo_to_lines with ResponseFormat::ElastiCache")]
+pub fn convert_ftinfo_to_lines_legacy(reply: &RespValue, _prefix: Option<&str>) -> String {
+    convert_ftinfo_to_lines(reply, ResponseFormat::ElastiCache)
+}
+
+#[deprecated(note = "Use convert_ftinfo_to_lines with ResponseFormat::MemoryDb")]
+pub fn convert_memdb_ftinfo_to_lines(reply: &RespValue, _prefix: Option<&str>) -> String {
+    convert_ftinfo_to_lines(reply, ResponseFormat::MemoryDb)
+}
+
+#[deprecated(note = "Use get_field instead")]
+pub fn get_ftinfo_field<T: std::str::FromStr>(
+    info: &HashMap<String, String>,
+    field: &str,
+) -> Option<T> {
+    get_field(info, field)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -429,7 +548,7 @@ mod tests {
             RespValue::Integer(1000),
         ]);
 
-        let lines = convert_ftinfo_to_lines(&reply, None);
+        let lines = convert_ftinfo_to_lines(&reply, ResponseFormat::ElastiCache);
         assert!(lines.contains("index_name:my-index"));
         assert!(lines.contains("num_docs:1000"));
     }
@@ -444,7 +563,7 @@ mod tests {
             ]),
         ]);
 
-        let lines = convert_ftinfo_to_lines(&reply, None);
+        let lines = convert_ftinfo_to_lines(&reply, ResponseFormat::ElastiCache);
         assert!(lines.contains("attributes.dim:128"));
     }
 
@@ -469,5 +588,41 @@ mod tests {
             EngineType::detect("# Server\r\nmemorydb_version:7.1.0\r\n"),
             EngineType::MemoryDb
         );
+    }
+
+    #[test]
+    fn test_validation_memdb() {
+        let mut raw = HashMap::new();
+        raw.insert("index_status".to_string(), "AVAILABLE".to_string());
+        raw.insert("index_degradation_percentage".to_string(), "0".to_string());
+        raw.insert("num_indexed_vectors".to_string(), "1000".to_string());
+
+        assert!(validate_memdb_ftinfo(&raw).is_ok());
+
+        let incomplete = HashMap::new();
+        assert!(validate_memdb_ftinfo(&incomplete).is_err());
+    }
+
+    #[test]
+    fn test_validation_search_info() {
+        let mut search_info = HashMap::new();
+        search_info.insert("search_num_active_backfills".to_string(), "0".to_string());
+
+        assert!(validate_search_info(&search_info, 0).is_ok());
+        assert!(validate_search_info(&search_info, 1).is_err());
+
+        search_info.insert(
+            "search_current_backfill_progress_percentage".to_string(),
+            "50".to_string(),
+        );
+        assert!(validate_search_info(&search_info, 1).is_ok());
+    }
+
+    #[test]
+    fn test_ec_backfill_default() {
+        let reply = RespValue::Array(vec![]);
+        let result = FtInfoResult::from_ec_response(&reply);
+        assert_eq!(result.backfill_complete_percent, 0.0);
+        assert_eq!(result.ec_progress_percent(), 0);
     }
 }

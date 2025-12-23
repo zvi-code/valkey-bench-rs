@@ -19,12 +19,14 @@ pub mod snapshot;
 
 pub use backfill::{
     get_node_progress, get_node_progress_ec, get_node_progress_memorydb,
-    wait_for_index_backfill_complete, BackfillWaitConfig, ClusterBackfillProgress, NodeProgress,
+    get_node_progress_with_context, wait_for_index_backfill_complete, BackfillWaitConfig,
+    ClusterBackfillProgress, MemoryDbProgressContext, NodeProgress,
 };
 pub use collector::MetricsCollector;
 pub use ft_info::{
-    convert_ftinfo_to_lines, convert_memdb_ftinfo_to_lines, parse_ftinfo_lines,
-    EngineType, FtInfoResult, IndexStatus,
+    convert_ftinfo_to_lines, fields, get_field, get_field_or, parse_ftinfo_lines,
+    validate_memdb_ftinfo, validate_search_info, EngineType, FtInfoResult, IndexStatus,
+    ResponseFormat, ValidationError,
 };
 pub use info_fields::{
     default_ftinfo_fields, default_info_fields, default_search_info_fields, AggregationType,

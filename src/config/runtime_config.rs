@@ -472,24 +472,7 @@ impl<'a> RuntimeConfigManager<'a> {
 
     /// Parse memory value with optional suffix (kb, mb, gb)
     fn parse_memory_value(value: &str) -> Option<u64> {
-        let value = value.trim().to_lowercase();
-
-        if let Ok(n) = value.parse::<u64>() {
-            return Some(n);
-        }
-
-        let multiplier = if value.ends_with("kb") || value.ends_with("k") {
-            1024
-        } else if value.ends_with("mb") || value.ends_with("m") {
-            1024 * 1024
-        } else if value.ends_with("gb") || value.ends_with("g") {
-            1024 * 1024 * 1024
-        } else {
-            return None;
-        };
-
-        let num_str = value.trim_end_matches(|c: char| c.is_alphabetic());
-        num_str.parse::<u64>().ok().map(|n| n * multiplier)
+        crate::utils::parse_memory_value_u64(value)
     }
 }
 

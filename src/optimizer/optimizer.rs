@@ -233,19 +233,13 @@ impl Constraint {
     /// Parse constraint from string: "metric:op:value"
     /// Examples: "recall:gt:0.95", "p99_ms:lt:0.1", "qps:gte:100000"
     pub fn parse(s: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 3 {
-            return Err(format!(
-                "Invalid constraint format: '{}'. Expected 'metric:op:value' (e.g., 'recall:gt:0.95', 'p99_ms:lt:0.1')",
-                s
-            ));
-        }
+        use crate::utils::ColonParser;
+        let p = ColonParser::new(s, "constraint (metric:op:value)");
+        p.require_parts(3)?;
 
-        let metric = parts[0].parse::<Metric>()?;
-        let op = parts[1].parse::<CompareOp>()?;
-        let value = parts[2]
-            .parse::<f64>()
-            .map_err(|e| format!("Invalid value '{}': {}", parts[2], e))?;
+        let metric = p.parse_with_context::<Metric>(0, "metric")?;
+        let op = p.parse_with_context::<CompareOp>(1, "operator")?;
+        let value = p.parse_with_context::<f64>(2, "value")?;
 
         Ok(Self::new(metric, op, value))
     }
@@ -354,39 +348,29 @@ impl ObjectiveGoal {
     /// - "maximize:qps:lt:1000000" (bounded)
     /// - "minimize:p99_ms:gt:0.1" (bounded)
     pub fn parse(s: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() < 2 {
-            return Err(format!(
-                "Invalid goal format: '{}'. Expected 'maximize:metric' or 'minimize:metric[:op:value]'",
-                s
-            ));
-        }
+        use crate::utils::ColonParser;
+        let p = ColonParser::new(s, "goal (direction:metric[:op:value])");
+        p.require_min_parts(2)?;
 
-        let direction = match parts[0].to_lowercase().as_str() {
+        let direction = match p.part(0).unwrap().to_lowercase().as_str() {
             "maximize" | "max" => OptimizeDirection::Maximize,
             "minimize" | "min" => OptimizeDirection::Minimize,
-            _ => {
-                return Err(format!(
-                    "Invalid direction: '{}'. Expected 'maximize' or 'minimize'",
-                    parts[0]
-                ))
-            }
+            other => return Err(format!(
+                "Invalid direction: '{}'. Expected 'maximize' or 'minimize'", other
+            )),
         };
 
-        let metric = parts[1].parse::<Metric>()?;
+        let metric = p.parse_with_context::<Metric>(1, "metric")?;
         let mut goal = ObjectiveGoal::new(direction, metric);
 
         // Parse optional bound: :op:value
-        if parts.len() >= 4 {
-            let op = parts[2].parse::<CompareOp>()?;
-            let value = parts[3]
-                .parse::<f64>()
-                .map_err(|e| format!("Invalid bound value '{}': {}", parts[3], e))?;
+        if p.len() >= 4 {
+            let op = p.parse_with_context::<CompareOp>(2, "operator")?;
+            let value = p.parse_with_context::<f64>(3, "bound value")?;
             goal = goal.with_bound(op, value);
-        } else if parts.len() == 3 {
+        } else if p.len() == 3 {
             return Err(format!(
-                "Invalid goal format: '{}'. Bound requires both operator and value (e.g., ':lt:1000000')",
-                s
+                "Invalid goal format: '{}'. Bound requires both operator and value (e.g., ':lt:1000000')", s
             ));
         }
 
@@ -743,18 +727,14 @@ impl TunableParameter {
     /// Parse from string: "type:min:max:step"
     /// Examples: "ef_search:10:500:10", "clients:10:200:10", "threads:1:16:1"
     pub fn parse(s: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 4 {
-            return Err(format!(
-                "Invalid parameter format: '{}'. Expected 'type:min:max:step' (e.g., 'clients:10:200:10')",
-                s
-            ));
-        }
+        use crate::utils::ColonParser;
+        let p = ColonParser::new(s, "parameter (type:min:max:step)");
+        p.require_parts(4)?;
 
-        let param_type = parts[0].parse::<ParameterType>()?;
-        let min = parts[1].parse::<u32>().map_err(|e| format!("Invalid min: {}", e))?;
-        let max = parts[2].parse::<u32>().map_err(|e| format!("Invalid max: {}", e))?;
-        let step = parts[3].parse::<u32>().map_err(|e| format!("Invalid step: {}", e))?;
+        let param_type = p.parse_with_context::<ParameterType>(0, "type")?;
+        let min = p.parse_with_context::<u32>(1, "min")?;
+        let max = p.parse_with_context::<u32>(2, "max")?;
+        let step = p.parse_with_context::<u32>(3, "step")?;
 
         if min > max {
             return Err(format!("min ({}) must be <= max ({})", min, max));

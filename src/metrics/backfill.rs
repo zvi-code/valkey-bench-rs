@@ -2,19 +2,26 @@
 //!
 //! Provides functions to monitor index backfill progress across cluster nodes,
 //! supporting both EC (ElastiCache Valkey) and MemoryDB engines.
+//!
+//! This module implements the same logic as the C code for accurate progress detection.
 
+use std::collections::HashMap;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
 use super::ft_info::{
-    convert_ftinfo_to_lines, convert_memdb_ftinfo_to_lines, parse_ftinfo_lines, EngineType,
-    FtInfoResult, IndexStatus,
+    convert_ftinfo_to_lines, fields, get_field_or, parse_ftinfo_lines, validate_memdb_ftinfo,
+    validate_search_info, EngineType, IndexStatus, ResponseFormat,
 };
 use crate::client::{ControlPlane, RawConnection};
 use crate::cluster::ClusterNode;
 use crate::utils::{RespEncoder, RespValue};
+
+// ============================================================================
+// Node Progress
+// ============================================================================
 
 /// Progress information for a single node
 #[derive(Debug, Clone)]
@@ -31,12 +38,33 @@ pub struct NodeProgress {
     pub status: IndexStatus,
 }
 
+impl Default for NodeProgress {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            num_docs: 0,
+            progress_percent: 100,
+            in_progress: false,
+            status: IndexStatus::Available,
+        }
+    }
+}
+
+// ============================================================================
+// EC (ElastiCache Valkey) Progress Detection
+// ============================================================================
+
 /// Get node progress for EC (ElastiCache Valkey)
+///
+/// Matches C code logic:
+/// - Parse backfill_in_progress (default 0)
+/// - Parse backfill_complete_percent (default 0.0)
+/// - progress_percent = backfill_complete_percent * 100
+/// - Return backfill_in_progress as in_progress flag
 pub fn get_node_progress_ec(
     conn: &mut RawConnection,
     index_name: &str,
 ) -> Result<NodeProgress, String> {
-    // Send FT.INFO command
     let mut encoder = RespEncoder::with_capacity(128);
     encoder.encode_command_str(&["FT.INFO", index_name]);
 
@@ -44,33 +72,31 @@ pub fn get_node_progress_ec(
         .execute_encoded(&encoder)
         .map_err(|e| format!("FT.INFO failed: {}", e))?;
 
-    let lines = convert_ftinfo_to_lines(&reply, None);
+    let lines = convert_ftinfo_to_lines(&reply, ResponseFormat::ElastiCache);
     let info = parse_ftinfo_lines(&lines);
 
-    // Extract backfill status
-    let backfill_in_progress: i32 = info
-        .get("backfill_in_progress")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    // Extract fields with C-compatible defaults
+    let backfill_in_progress: i32 =
+        get_field_or(&info, fields::ec::BACKFILL_IN_PROGRESS, 0);
+    let backfill_complete_percent: f64 =
+        get_field_or(&info, fields::ec::BACKFILL_COMPLETE_PERCENT, 0.0);
+    let num_docs: i64 = get_field_or(&info, fields::ec::NUM_DOCS, 0);
 
-    let backfill_complete_percent: f64 = info
-        .get("backfill_complete_percent")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1.0);
-
-    let num_docs: i64 = info
-        .get("num_docs")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let progress_percent = (backfill_complete_percent * 100.0) as i32;
+    // Determine progress based on backfill state
+    // - If in_progress: progress = backfill_complete_percent * 100
+    // - If complete: progress = 100
+    let (in_progress, progress_percent) = if backfill_in_progress != 0 {
+        (true, (backfill_complete_percent * 100.0) as i32)
+    } else {
+        (false, 100)
+    };
 
     Ok(NodeProgress {
-        node_id: String::new(), // Set by caller
+        node_id: String::new(),
         num_docs,
         progress_percent,
-        in_progress: backfill_in_progress != 0,
-        status: if backfill_in_progress != 0 {
+        in_progress,
+        status: if in_progress {
             IndexStatus::Backfilling
         } else {
             IndexStatus::Available
@@ -78,10 +104,35 @@ pub fn get_node_progress_ec(
     })
 }
 
+// ============================================================================
+// MemoryDB Progress Detection
+// ============================================================================
+
+/// Context for MemoryDB progress detection
+pub struct MemoryDbProgressContext {
+    /// Whether this node is a replica
+    pub is_replica: bool,
+}
+
+impl Default for MemoryDbProgressContext {
+    fn default() -> Self {
+        Self { is_replica: false }
+    }
+}
+
 /// Get node progress for MemoryDB
+///
+/// Matches C code logic exactly:
+/// 1. Send FT.INFO and INFO SEARCH commands
+/// 2. If FT.INFO is empty:
+///    - If replica: return in_progress=true, progress=0
+///    - Otherwise: error
+/// 3. Validate required fields exist
+/// 4. Determine progress based on status and degradation
 pub fn get_node_progress_memorydb(
     conn: &mut RawConnection,
     index_name: &str,
+    ctx: &MemoryDbProgressContext,
 ) -> Result<NodeProgress, String> {
     // Send FT.INFO command
     let mut encoder = RespEncoder::with_capacity(128);
@@ -91,7 +142,7 @@ pub fn get_node_progress_memorydb(
         .execute_encoded(&encoder)
         .map_err(|e| format!("FT.INFO failed: {}", e))?;
 
-    let ft_info_lines = convert_memdb_ftinfo_to_lines(&ft_info_reply, None);
+    let ft_info_lines = convert_ftinfo_to_lines(&ft_info_reply, ResponseFormat::MemoryDb);
     let ft_info = parse_ftinfo_lines(&ft_info_lines);
 
     // Send INFO SEARCH command
@@ -103,55 +154,122 @@ pub fn get_node_progress_memorydb(
         .map_err(|e| format!("INFO SEARCH failed: {}", e))?;
 
     let search_info_lines = match &search_info_reply {
-        RespValue::BulkString(data) => String::from_utf8_lossy(data).to_string(),
-        _ => convert_memdb_ftinfo_to_lines(&search_info_reply, None),
+        RespValue::BulkString(data) => String::from_utf8_lossy(data.as_slice()).to_string(),
+        _ => convert_ftinfo_to_lines(&search_info_reply, ResponseFormat::MemoryDb),
     };
     let search_info = parse_ftinfo_lines(&search_info_lines);
 
+    // Handle empty FT.INFO response (C code logic)
+    if ft_info_lines.is_empty() {
+        if ctx.is_replica {
+            // Replica might be lagging, return in progress
+            return Ok(NodeProgress {
+                node_id: String::new(),
+                num_docs: 0,
+                progress_percent: 0,
+                in_progress: true,
+                status: IndexStatus::Backfilling,
+            });
+        } else {
+            return Err("Empty FT.INFO response from primary node".to_string());
+        }
+    }
+
+    // Validate required fields (C code asserts these exist)
+    validate_memdb_ftinfo(&ft_info).map_err(|e| e.message)?;
+
+    // Parse search_num_active_backfills (required)
+    let active_backfills: i32 =
+        get_field_or(&search_info, fields::search_info::NUM_ACTIVE_BACKFILLS, -1);
+    if active_backfills < 0 {
+        return Err(format!(
+            "Missing {} in INFO SEARCH response",
+            fields::search_info::NUM_ACTIVE_BACKFILLS
+        ));
+    }
+
+    // Validate search_current_backfill_progress_percentage conditionally
+    validate_search_info(&search_info, active_backfills).map_err(|e| e.message)?;
+
     // Parse FT.INFO fields
-    let status_str = ft_info.get("index_status").map(|s| s.as_str()).unwrap_or("AVAILABLE");
+    let status_str = ft_info
+        .get(fields::memdb::INDEX_STATUS)
+        .map(|s| s.as_str())
+        .unwrap_or("AVAILABLE");
     let status = IndexStatus::from_str(status_str);
 
-    let degradation: i32 = ft_info
-        .get("index_degradation_percentage")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let degradation: i32 =
+        get_field_or(&ft_info, fields::memdb::INDEX_DEGRADATION_PERCENTAGE, 0);
+    let num_docs: i64 = get_field_or(&ft_info, fields::memdb::NUM_INDEXED_VECTORS, 0);
 
-    let num_docs: i64 = ft_info
-        .get("num_indexed_vectors")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    // Determine progress (matching C code logic exactly)
+    let (in_progress, progress_percent) =
+        calculate_memdb_progress(&status, degradation, &search_info)?;
 
-    // Parse INFO SEARCH fields
-    let active_backfills: i32 = search_info
-        .get("search_num_active_backfills")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let backfill_progress: i32 = search_info
-        .get("search_current_backfill_progress_percentage")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
-
-    // Determine progress
-    let (in_progress, progress_percent) = if status == IndexStatus::Backfilling {
-        (true, backfill_progress)
-    } else if degradation > 0 {
-        (true, 100 - degradation)
-    } else if status.is_in_progress() || active_backfills > 0 {
-        (true, backfill_progress)
-    } else {
-        (false, 100)
-    };
+    // C code asserts status is AVAILABLE if not in backfilling state
+    if !in_progress && !status.is_available() {
+        return Err(format!(
+            "Unexpected status '{:?}' when not backfilling",
+            status
+        ));
+    }
 
     Ok(NodeProgress {
-        node_id: String::new(), // Set by caller
+        node_id: String::new(),
         num_docs,
         progress_percent,
         in_progress,
         status,
     })
 }
+
+/// Calculate MemoryDB progress matching C code logic
+///
+/// Priority order (matching pseudocode):
+/// 1. BACKFILLING: return in_progress=true, progress=search_backfill_progress
+/// 2. QUEUED: return in_progress=true, progress=0 (regardless of degradation)
+/// 3. degradation > 0: return in_progress=true, progress=100-degradation
+/// 4. AVAILABLE: return in_progress=false, progress=100
+fn calculate_memdb_progress(
+    status: &IndexStatus,
+    degradation: i32,
+    search_info: &HashMap<String, String>,
+) -> Result<(bool, i32), String> {
+    // Check BACKFILLING first - use search progress
+    if matches!(status, IndexStatus::Backfilling) {
+        let progress = get_field_or(
+            search_info,
+            fields::search_info::BACKFILL_PROGRESS_PERCENTAGE,
+            0,
+        );
+        return Ok((true, progress));
+    }
+
+    // Check QUEUED second - returns 0 regardless of degradation
+    if matches!(status, IndexStatus::Queued) {
+        return Ok((true, 0));
+    }
+
+    // Check degradation third
+    if degradation > 0 {
+        return Ok((true, 100 - degradation));
+    }
+
+    // AVAILABLE with no degradation
+    Ok((false, 100))
+}
+
+/// Get node progress for MemoryDB (simple API without context)
+pub fn get_node_progress_memorydb_simple(
+    conn: &mut RawConnection,
+    index_name: &str,
+) -> Result<NodeProgress, String> {
+    get_node_progress_memorydb(conn, index_name, &MemoryDbProgressContext::default())
+}
+
+// ============================================================================
+// Unified Progress Detection
+// ============================================================================
 
 /// Get node progress based on engine type
 pub fn get_node_progress(
@@ -160,10 +278,30 @@ pub fn get_node_progress(
     engine_type: EngineType,
 ) -> Result<NodeProgress, String> {
     match engine_type {
-        EngineType::MemoryDb => get_node_progress_memorydb(conn, index_name),
+        EngineType::MemoryDb => get_node_progress_memorydb_simple(conn, index_name),
         _ => get_node_progress_ec(conn, index_name),
     }
 }
+
+/// Get node progress with replica context (for MemoryDB)
+pub fn get_node_progress_with_context(
+    conn: &mut RawConnection,
+    index_name: &str,
+    engine_type: EngineType,
+    is_replica: bool,
+) -> Result<NodeProgress, String> {
+    match engine_type {
+        EngineType::MemoryDb => {
+            let ctx = MemoryDbProgressContext { is_replica };
+            get_node_progress_memorydb(conn, index_name, &ctx)
+        }
+        _ => get_node_progress_ec(conn, index_name),
+    }
+}
+
+// ============================================================================
+// Cluster-wide Progress
+// ============================================================================
 
 /// Cluster-wide backfill progress
 #[derive(Debug, Clone)]
@@ -203,8 +341,6 @@ impl Default for BackfillWaitConfig {
 }
 
 /// Wait for index backfill to complete on all nodes
-///
-/// This function polls all cluster nodes until backfill is complete or timeout.
 pub fn wait_for_index_backfill_complete<F>(
     engine_type: EngineType,
     index_names: &[&str],
@@ -224,7 +360,6 @@ where
         });
     }
 
-    // Print waiting message
     let engine_name = match engine_type {
         EngineType::MemoryDb => "MemoryDB",
         _ => "ValkeySearch",
@@ -238,10 +373,8 @@ where
         index_list
     );
 
-    // Initial delay
     thread::sleep(config.initial_delay);
 
-    // Set up progress bar
     let progress_bar = if config.show_progress {
         let pb = ProgressBar::new(100);
         pb.set_style(
@@ -264,7 +397,6 @@ where
     };
 
     loop {
-        // Check timeout
         if let Some(max_wait) = config.max_wait {
             if start_time.elapsed() > max_wait {
                 if let Some(pb) = &progress_bar {
@@ -274,7 +406,6 @@ where
             }
         }
 
-        // Collect progress from all nodes
         let mut total_docs = 0i64;
         let mut nodes_in_progress = 0usize;
         let mut total_progress = 0i32;
@@ -300,7 +431,7 @@ where
                     }
                     Err(e) => {
                         eprintln!("Warning: Failed to get progress from node {}: {}", node_idx, e);
-                        nodes_in_progress += 1; // Assume still in progress on error
+                        nodes_in_progress += 1;
                     }
                 }
             }
@@ -320,7 +451,6 @@ where
             node_progress,
         };
 
-        // Update progress bar
         if let Some(pb) = &progress_bar {
             pb.set_position(avg_progress as u64);
             pb.set_message(format!(
@@ -329,7 +459,6 @@ where
             ));
         }
 
-        // Check if complete
         if nodes_in_progress == 0 {
             break;
         }
@@ -337,7 +466,6 @@ where
         thread::sleep(config.poll_interval);
     }
 
-    // Finish progress bar
     if let Some(pb) = &progress_bar {
         pb.set_position(100);
         pb.finish_with_message(format!("Complete - {} docs", last_progress.total_docs));
@@ -391,6 +519,10 @@ pub fn wait_for_backfill<'a>(
     )
 }
 
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +545,54 @@ mod tests {
             node_progress: vec![],
         };
         assert_eq!(progress.progress_percent, 100);
+    }
+
+    #[test]
+    fn test_memdb_progress_calculation() {
+        let search_info = HashMap::new();
+
+        // Available with no degradation
+        let (in_progress, pct) =
+            calculate_memdb_progress(&IndexStatus::Available, 0, &search_info).unwrap();
+        assert!(!in_progress);
+        assert_eq!(pct, 100);
+
+        // Degraded
+        let (in_progress, pct) =
+            calculate_memdb_progress(&IndexStatus::Available, 30, &search_info).unwrap();
+        assert!(in_progress);
+        assert_eq!(pct, 70);
+
+        // Queued (no degradation)
+        let (in_progress, pct) =
+            calculate_memdb_progress(&IndexStatus::Queued, 0, &search_info).unwrap();
+        assert!(in_progress);
+        assert_eq!(pct, 0);
+
+        // Queued with degradation - should still be 0 (QUEUED takes priority)
+        let (in_progress, pct) =
+            calculate_memdb_progress(&IndexStatus::Queued, 30, &search_info).unwrap();
+        assert!(in_progress);
+        assert_eq!(pct, 0);
+
+        // Backfilling with progress
+        let mut search_info_with_progress = HashMap::new();
+        search_info_with_progress.insert(
+            "search_current_backfill_progress_percentage".to_string(),
+            "45".to_string(),
+        );
+        let (in_progress, pct) =
+            calculate_memdb_progress(&IndexStatus::Backfilling, 0, &search_info_with_progress)
+                .unwrap();
+        assert!(in_progress);
+        assert_eq!(pct, 45);
+    }
+
+    #[test]
+    fn test_node_progress_default() {
+        let progress = NodeProgress::default();
+        assert_eq!(progress.progress_percent, 100);
+        assert!(!progress.in_progress);
+        assert_eq!(progress.status, IndexStatus::Available);
     }
 }
