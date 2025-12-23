@@ -158,12 +158,10 @@ impl NumericFilter {
             } else {
                 NumericBound::Inclusive(min_str.parse().map_err(|_| format!("Invalid min: {}", min_str))?)
             }
+        } else if min_str.eq_ignore_ascii_case("-inf") {
+            NumericBound::NegInf
         } else {
-            if min_str.eq_ignore_ascii_case("-inf") {
-                NumericBound::NegInf
-            } else {
-                NumericBound::Exclusive(min_str.parse().map_err(|_| format!("Invalid min: {}", min_str))?)
-            }
+            NumericBound::Exclusive(min_str.parse().map_err(|_| format!("Invalid min: {}", min_str))?)
         };
 
         let max = if last_char == ']' {
@@ -172,12 +170,10 @@ impl NumericFilter {
             } else {
                 NumericBound::Inclusive(max_str.parse().map_err(|_| format!("Invalid max: {}", max_str))?)
             }
+        } else if max_str.eq_ignore_ascii_case("+inf") || max_str.eq_ignore_ascii_case("inf") {
+            NumericBound::Inf
         } else {
-            if max_str.eq_ignore_ascii_case("+inf") || max_str.eq_ignore_ascii_case("inf") {
-                NumericBound::Inf
-            } else {
-                NumericBound::Exclusive(max_str.parse().map_err(|_| format!("Invalid max: {}", max_str))?)
-            }
+            NumericBound::Exclusive(max_str.parse().map_err(|_| format!("Invalid max: {}", max_str))?)
         };
 
         Ok(Self::new(field, min, max))

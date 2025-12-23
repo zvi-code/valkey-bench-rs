@@ -1290,7 +1290,7 @@ impl Optimizer {
 
             let param = &self.parameters[param_idx];
             let step_multiplier = (direction_idx / 2) as u32 + 1; // 1, 2, or 3
-            let direction = if direction_idx % 2 == 0 { 1i32 } else { -1 };
+            let direction = if direction_idx.is_multiple_of(2) { 1i32 } else { -1 };
             let step_size = param.step * step_multiplier;
 
             self.exploit_attempts += 1;

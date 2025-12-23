@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Iteration strategy for workload key generation
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum IterationStrategy {
     /// Sequential iteration (0, 1, 2, ...)
+    #[default]
     Sequential,
 
     /// Deterministic pseudo-random iteration
@@ -40,11 +42,6 @@ pub enum IterationStrategy {
     },
 }
 
-impl Default for IterationStrategy {
-    fn default() -> Self {
-        IterationStrategy::Sequential
-    }
-}
 
 impl IterationStrategy {
     /// Create a sequential strategy

@@ -111,7 +111,7 @@ impl KeyFormat {
             // Validate tag structure: 1-3 chars inside braces (longer tags use more slots)
             // tag_end - 1 = number of chars inside braces (since rest starts with '{')
             let inner_len = tag_end.saturating_sub(1);
-            if inner_len < 1 || inner_len > CLUSTER_TAG_INNER_LEN {
+            if !(1..=CLUSTER_TAG_INNER_LEN).contains(&inner_len) {
                 return None;
             }
 

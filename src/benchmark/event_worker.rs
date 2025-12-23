@@ -651,7 +651,7 @@ impl EventWorker {
         };
 
         // Create clients distributed across addresses
-        for (_addr_idx, (host, port)) in addresses.iter().enumerate() {
+        for (host, port) in addresses.iter() {
             // Get slots for this node (if cluster mode)
             let node_slots = slot_map.get(&(host.clone(), *port));
 
@@ -690,7 +690,7 @@ impl EventWorker {
                 // Track which clients belong to which node (add to ready queue)
                 node_ready_queues
                     .entry((host.clone(), *port))
-                    .or_insert_with(VecDeque::new)
+                    .or_default()
                     .push_back(client_idx);
             }
         }
@@ -1024,7 +1024,7 @@ impl EventWorker {
                 .wrapping_add(attempt.wrapping_mul(0x517CC1B727220A95));
 
             // Extract 3 characters (A-Z)
-            let c1 = b'A' + ((mixed >> 0) % 26) as u8;
+            let c1 = b'A' + (mixed % 26) as u8;
             let c2 = b'A' + ((mixed >> 8) % 26) as u8;
             let c3 = b'A' + ((mixed >> 16) % 26) as u8;
 

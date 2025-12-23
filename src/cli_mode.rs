@@ -147,7 +147,7 @@ fn get_server_info(conn: &mut RawConnection) -> ServerInfo {
     // Check if it's Redis or Valkey based on version string
     if version.contains("valkey") || info.contains("valkey_version") {
         server_type = "Valkey".to_string();
-    } else if version.len() > 0 && version.chars().next().unwrap().is_ascii_digit() {
+    } else if !version.is_empty() && version.chars().next().unwrap().is_ascii_digit() {
         // Numeric version likely means Redis
         if !info.contains("valkey") {
             server_type = "Redis".to_string();

@@ -364,7 +364,7 @@ impl Orchestrator {
                         crate::utils::ConnectionError::ConnectFailed {
                             host: addr.host.clone(),
                             port: addr.port,
-                            source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                            source: std::io::Error::other(e),
                         }
                     ))?;
 
@@ -391,8 +391,7 @@ impl Orchestrator {
                         crate::utils::ConnectionError::ConnectFailed {
                             host: addr.host.clone(),
                             port: addr.port,
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                            source: std::io::Error::other(
                                 format!("Cluster mode requested but CLUSTER NODES failed: {}", e),
                             ),
                         }
@@ -587,7 +586,7 @@ impl Orchestrator {
             .dataset
             .as_ref()
             .map(|ds| ds.num_vectors())
-            .unwrap_or(1_000_000) as u64;
+            .unwrap_or(1_000_000);
 
         let is_cluster = self.cluster_topology.is_some();
 
@@ -632,10 +631,8 @@ impl Orchestrator {
                     )));
                 }
             }
-        } else {
-            if !self.config.quiet {
-                info!("Standalone mode - cluster tag map will not route by node");
-            }
+        } else if !self.config.quiet {
+            info!("Standalone mode - cluster tag map will not route by node");
         }
 
         self.cluster_tag_map = Some(tag_map);
@@ -884,7 +881,7 @@ impl Orchestrator {
         // Get numeric field configurations
         let numeric_fields = self.config.search_config.as_ref()
             .map(|sc| sc.numeric_fields.clone())
-            .unwrap_or_else(NumericFieldSet::new);
+            .unwrap_or_default();
 
         for worker_id in 0..self.config.threads as usize {
             let config = Arc::clone(&self.config);

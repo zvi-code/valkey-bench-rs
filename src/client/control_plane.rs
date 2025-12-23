@@ -62,7 +62,7 @@ pub trait ControlPlaneExt: ControlPlane {
                     io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e))
                 })
             }
-            RespValue::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            RespValue::Error(e) => Err(io::Error::other(e)),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unexpected CLUSTER NODES response: {:?}", other),
@@ -90,7 +90,7 @@ pub trait ControlPlaneExt: ControlPlane {
                     io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e))
                 })
             }
-            RespValue::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            RespValue::Error(e) => Err(io::Error::other(e)),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unexpected INFO response: {:?}", other),
@@ -120,7 +120,7 @@ pub trait ControlPlaneExt: ControlPlane {
         let db_str = db.to_string();
         match self.execute(&["SELECT", &db_str])? {
             RespValue::SimpleString(s) if s == "OK" => Ok(()),
-            RespValue::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            RespValue::Error(e) => Err(io::Error::other(e)),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unexpected SELECT response: {:?}", other),
@@ -132,7 +132,7 @@ pub trait ControlPlaneExt: ControlPlane {
     fn flushdb(&mut self) -> io::Result<()> {
         match self.execute(&["FLUSHDB"])? {
             RespValue::SimpleString(s) if s == "OK" => Ok(()),
-            RespValue::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            RespValue::Error(e) => Err(io::Error::other(e)),
             _ => Ok(()), // Accept any success
         }
     }
@@ -141,7 +141,7 @@ pub trait ControlPlaneExt: ControlPlane {
     fn dbsize(&mut self) -> io::Result<i64> {
         match self.execute(&["DBSIZE"])? {
             RespValue::Integer(n) => Ok(n),
-            RespValue::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            RespValue::Error(e) => Err(io::Error::other(e)),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unexpected DBSIZE response: {:?}", other),

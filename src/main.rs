@@ -611,12 +611,11 @@ fn run() -> Result<()> {
     // - vec-query: know which vectors exist for recall computation
     // - vec-delete/vec-update: operate on existing vectors
     // If no keys exist, scan completes very fast
-    if has_vec_workload {
-        if config.search_config.is_some() {
+    if has_vec_workload
+        && config.search_config.is_some() {
             info!("Building cluster tag map for existing vectors...");
             orchestrator.build_cluster_tag_map()?;
         }
-    }
 
     // Build protected IDs for vec-delete (skip ground truth vectors)
     // The orchestrator.build_protected_ids() will only succeed if a dataset is loaded

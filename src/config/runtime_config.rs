@@ -110,13 +110,11 @@ impl RuntimeConfig {
     /// Remove surrounding quotes from a value
     fn unquote(value: &str) -> String {
         let value = value.trim();
-        if (value.starts_with('"') && value.ends_with('"'))
-            || (value.starts_with('\'') && value.ends_with('\''))
-        {
-            if value.len() >= 2 {
+        if ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+            && value.len() >= 2 {
                 return value[1..value.len() - 1].to_string();
             }
-        }
         value.to_string()
     }
 

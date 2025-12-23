@@ -69,7 +69,7 @@ impl TagDistributionSet {
                 )
             })?;
 
-            if percentage < 0.0 || percentage > 100.0 {
+            if !(0.0..=100.0).contains(&percentage) {
                 return Err(format!("Percentage must be 0-100, got {}", percentage));
             }
 

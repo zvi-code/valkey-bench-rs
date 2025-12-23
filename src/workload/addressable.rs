@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Type of address being used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum AddressType {
     /// Simple key (default)
+    #[default]
     Key,
     /// Hash field (key + field name)
     HashField,
@@ -21,11 +23,6 @@ pub enum AddressType {
     Channel,
 }
 
-impl Default for AddressType {
-    fn default() -> Self {
-        AddressType::Key
-    }
-}
 
 impl std::fmt::Display for AddressType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
