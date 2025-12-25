@@ -86,9 +86,9 @@ pub struct CliArgs {
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: u32,
 
-    /// Total number of requests to issue
-    #[arg(short = 'n', long = "requests", default_value_t = 100000)]
-    pub requests: u64,
+    /// Total number of requests to issue (default: 100000, or dataset size for vec-load)
+    #[arg(short = 'n', long = "requests")]
+    pub requests: Option<u64>,
 
     /// Database number to SELECT
     #[arg(long = "dbnum")]
@@ -556,8 +556,9 @@ impl CliArgs {
 
     /// Get effective keyspace length
     pub fn effective_keyspace(&self) -> u64 {
+        const DEFAULT_REQUESTS: u64 = 100_000;
         if self.keyspace_len == 0 {
-            self.requests
+            self.requests.unwrap_or(DEFAULT_REQUESTS)
         } else {
             self.keyspace_len
         }
@@ -573,7 +574,7 @@ mod tests {
         let args = CliArgs::parse_from(["test"]);
         assert_eq!(args.port, 6379);
         assert_eq!(args.clients, 50);
-        assert_eq!(args.requests, 100000);
+        assert_eq!(args.requests, None); // None means use dataset size or default 100000
         assert_eq!(args.pipeline, 1);
     }
 

@@ -326,6 +326,15 @@ impl Orchestrator {
         &self.backend
     }
 
+    /// Get effective requests count based on config and dataset
+    ///
+    /// For vec-load workloads, defaults to dataset size if no explicit count was provided.
+    /// For other workloads, defaults to 100,000.
+    fn effective_requests(&self) -> u64 {
+        let dataset_size = self.dataset.as_ref().map(|ds| ds.num_vectors());
+        self.config.effective_requests(dataset_size)
+    }
+
     /// Get the detected engine type
     pub fn engine_type(&self) -> EngineType {
         self.backend.engine_type()
@@ -765,17 +774,17 @@ impl Orchestrator {
         let effective_requests = if matches!(workload, WorkloadType::VecLoad) {
             if let Some(ref tag_map) = self.cluster_tag_map {
                 tag_map.reset_unmapped_counter();
-                
+
                 // Calculate vectors to actually load (skip existing)
                 let already_mapped = tag_map.count();
                 let dataset_size = self.dataset.as_ref().map(|ds| ds.num_vectors()).unwrap_or(0);
-                let requested = self.config.requests.min(dataset_size);
+                let requested = self.effective_requests().min(dataset_size);
                 let to_load = requested.saturating_sub(already_mapped);
-                
+
                 if already_mapped > 0 && !self.config.quiet {
                     info!(
                         "Partial prefill: {} vectors already exist, {} to load (of {} requested)",
-                        already_mapped, to_load, self.config.requests
+                        already_mapped, to_load, requested
                     );
                 }
 
@@ -797,13 +806,13 @@ impl Orchestrator {
                         keyspace_stats: KeyspaceStats::default(),
                     });
                 }
-                
+
                 to_load
             } else {
-                self.config.requests
+                self.effective_requests()
             }
         } else {
-            self.config.requests
+            self.effective_requests()
         };
 
         // Create command template (use cluster mode if we have cluster topology)
@@ -947,7 +956,7 @@ impl Orchestrator {
         // Progress reporting (if not quiet)
         if !self.config.quiet {
             let counters_clone = Arc::clone(&counters);
-            let total = self.config.requests;
+            let total = self.effective_requests();
             let duration_secs = self.config.duration_secs;
             thread::spawn(move || {
                 Self::report_progress(&counters_clone, total, duration_secs);
@@ -1060,7 +1069,7 @@ impl Orchestrator {
         let counters = Arc::new(if let Some(duration) = self.config.duration_secs {
             GlobalCounters::with_duration(duration)
         } else {
-            GlobalCounters::with_requests(self.config.requests)
+            GlobalCounters::with_requests(self.effective_requests())
         });
 
         // Get addresses for workers
@@ -1376,7 +1385,7 @@ impl Orchestrator {
             self.config.clients,
             self.config.threads,
             self.config.pipeline,
-            self.config.requests
+            self.effective_requests()
         );
 
         let mut benchmark_results = BenchmarkResults::new(&config_summary);

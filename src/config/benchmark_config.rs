@@ -46,7 +46,8 @@ pub struct BenchmarkConfig {
     pub pipeline: u32,
 
     // Request generation
-    pub requests: u64,
+    /// Explicit request count from CLI (None = use default or dataset size)
+    pub requests: Option<u64>,
     pub duration_secs: Option<u64>,
     pub warmup_requests: u64,
     pub keyspace_len: u64,
@@ -231,6 +232,35 @@ impl BenchmarkConfig {
     /// Get clients per thread
     pub fn clients_per_thread(&self) -> u32 {
         self.clients.div_ceil(self.threads)
+    }
+
+    /// Get effective requests count
+    ///
+    /// Returns:
+    /// - Explicit value if provided via CLI
+    /// - dataset_size if provided (for vec-load workloads)
+    /// - 100,000 as default fallback
+    pub fn effective_requests(&self, dataset_size: Option<u64>) -> u64 {
+        const DEFAULT_REQUESTS: u64 = 100_000;
+
+        if let Some(explicit) = self.requests {
+            // User explicitly set requests via CLI
+            explicit
+        } else if let Some(ds_size) = dataset_size {
+            // Use dataset size for dataset-based workloads
+            ds_size
+        } else {
+            // Default fallback
+            DEFAULT_REQUESTS
+        }
+    }
+
+    /// Check if this config has vec-load workload
+    pub fn has_vec_load_workload(&self) -> bool {
+        self.tests.iter().any(|t| {
+            let lower = t.to_lowercase();
+            lower == "vecload" || lower == "vec-load"
+        })
     }
 
     /// Create a WorkloadConfig for the given workload type using global defaults

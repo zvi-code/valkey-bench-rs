@@ -48,7 +48,11 @@ fn setup_logging(verbose: bool, quiet: bool) {
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 }
 
-fn print_banner(config: &BenchmarkConfig, base_latency: Option<&benchmark::BaseLatency>) {
+fn print_banner(
+    config: &BenchmarkConfig,
+    base_latency: Option<&benchmark::BaseLatency>,
+    dataset_size: Option<u64>,
+) {
     if config.quiet {
         return;
     }
@@ -86,11 +90,12 @@ fn print_banner(config: &BenchmarkConfig, base_latency: Option<&benchmark::BaseL
     }
 
     // Workload config - compact single line
+    let effective_requests = config.effective_requests(dataset_size);
     let mut workload_parts = vec![
         format!("clients={}", config.clients),
         format!("threads={}", config.threads),
         format!("pipeline={}", config.pipeline),
-        format!("requests={}", benchmark::format_count(config.requests)),
+        format!("requests={}", benchmark::format_count(effective_requests)),
         format!("keyspace={}", benchmark::format_count(config.keyspace_len)),
     ];
     if config.data_size > 0 {
@@ -223,9 +228,11 @@ fn run_optimization(
     }
 
     // Compute base requests for adaptive duration
-    // Use config's request count as base, with a minimum for meaningful measurements
-    let base_requests = if base_config.requests >= 100_000 {
-        base_config.requests
+    // Use config's effective request count as base, with a minimum for meaningful measurements
+    let dataset_size = dataset.as_ref().map(|ds| ds.num_vectors());
+    let config_requests = base_config.effective_requests(dataset_size);
+    let base_requests = if config_requests >= 100_000 {
+        config_requests
     } else {
         100_000
     };
@@ -314,7 +321,7 @@ fn run_optimization(
 
         // Apply test configuration to base config
         let mut run_config = base_config.clone();
-        run_config.requests = recommended_requests;
+        run_config.requests = Some(recommended_requests);
         run_config.quiet = true; // Suppress verbose output during optimization iterations
 
         if let Some(clients) = test_config.clients {
@@ -470,7 +477,8 @@ fn run_optimization(
         }
 
         // Add request count suggestion (use a reasonable production run size)
-        cmd_parts.push(format!("-n {}", std::cmp::max(base_config.requests, 1_000_000)));
+        let effective_req = base_config.effective_requests(dataset_size);
+        cmd_parts.push(format!("-n {}", std::cmp::max(effective_req, 1_000_000)));
 
         println!("{}", cmd_parts.join(" "));
 
@@ -529,8 +537,19 @@ fn run() -> Result<()> {
     let dataset = match (&config.schema_path, &config.data_path) {
         (Some(schema_path), Some(data_path)) => {
             info!("Loading dataset: schema={:?}, data={:?}", schema_path, data_path);
-            let dataset = DatasetContext::open(schema_path, data_path)
+            let mut dataset = DatasetContext::open(schema_path, data_path)
                 .map_err(|e| anyhow::anyhow!("Failed to load dataset: {}", e))?;
+
+            // Apply CLI num_vectors and vector_offset overrides if provided
+            // CLI args override schema values when explicitly set (num_vectors > 0 or vector_offset > 0)
+            if config.num_vectors > 0 || config.vector_offset > 0 {
+                info!(
+                    "Applying CLI overrides: num_vectors={} (0=all), vector_offset={}",
+                    config.num_vectors, config.vector_offset
+                );
+                dataset.set_effective_limits(config.num_vectors, config.vector_offset);
+            }
+
             info!("{}", dataset.summary());
 
             // Update search config with dataset dimension and distance metric
@@ -552,9 +571,12 @@ fn run() -> Result<()> {
         _ => None,
     };
 
+    // Get dataset size for effective_requests calculation (before dataset is moved)
+    let dataset_size = dataset.as_ref().map(|ds| ds.num_vectors());
+
     // If optimization mode is enabled, run the optimizer (no base latency needed)
     if config.optimize {
-        print_banner(&config, None);
+        print_banner(&config, None, dataset_size);
         let dataset_arc = dataset.map(Arc::new);
         return run_optimization(&config, dataset_arc);
     }
@@ -588,7 +610,7 @@ fn run() -> Result<()> {
     };
 
     // Print banner with base latency
-    print_banner(&config, base_latency.as_ref());
+    print_banner(&config, base_latency.as_ref(), dataset_size);
 
     // Set dataset on orchestrator if loaded
     if let Some(dataset) = dataset {

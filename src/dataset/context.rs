@@ -36,6 +36,14 @@ pub struct DatasetContext {
     vector_field_offset: Option<usize>,
     vector_byte_len: Option<usize>,
     vector_dimensions: Option<u32>,
+
+    /// Effective record count override (None = use schema count)
+    /// This allows CLI arguments to limit the number of vectors used
+    effective_record_count: Option<u64>,
+
+    /// Effective record offset (0 = start from beginning)
+    /// This allows CLI arguments to skip initial vectors
+    effective_record_offset: u64,
 }
 
 impl DatasetContext {
@@ -92,7 +100,48 @@ impl DatasetContext {
             vector_field_offset,
             vector_byte_len,
             vector_dimensions,
+            effective_record_count: None,
+            effective_record_offset: 0,
         })
+    }
+
+    // === Effective Limits ===
+
+    /// Set effective limits for record access
+    ///
+    /// # Arguments
+    /// * `count` - Maximum number of records to use (0 or None = use all from schema)
+    /// * `offset` - Starting record index (0 = start from beginning)
+    ///
+    /// The effective count is clamped to the available records after applying offset.
+    pub fn set_effective_limits(&mut self, count: u64, offset: u64) {
+        let schema_count = self.section_layout.record_count;
+
+        // Clamp offset to schema count
+        let effective_offset = offset.min(schema_count);
+        self.effective_record_offset = effective_offset;
+
+        // Calculate remaining records after offset
+        let remaining = schema_count.saturating_sub(effective_offset);
+
+        // Apply count limit (0 means use all remaining)
+        if count > 0 && count < remaining {
+            self.effective_record_count = Some(count);
+        } else {
+            self.effective_record_count = None; // Use all remaining
+        }
+    }
+
+    /// Get the schema record count (ignoring effective limits)
+    #[inline]
+    pub fn schema_record_count(&self) -> u64 {
+        self.section_layout.record_count
+    }
+
+    /// Get the effective record offset
+    #[inline]
+    pub fn effective_offset(&self) -> u64 {
+        self.effective_record_offset
     }
 
     // === Schema & Layout Access ===
@@ -123,16 +172,21 @@ impl DatasetContext {
         self.vector_dimensions.unwrap_or(0) as usize
     }
 
-    /// Get number of database vectors/records
+    /// Get number of database vectors/records (respects effective limits)
     #[inline(always)]
     pub fn num_vectors(&self) -> u64 {
-        self.section_layout.record_count
+        if let Some(count) = self.effective_record_count {
+            count
+        } else {
+            // Use all records after offset
+            self.section_layout.record_count.saturating_sub(self.effective_record_offset)
+        }
     }
 
     /// Alias for num_vectors
     #[inline(always)]
     pub fn num_records(&self) -> u64 {
-        self.section_layout.record_count
+        self.num_vectors()
     }
 
     /// Get number of query vectors
@@ -161,11 +215,12 @@ impl DatasetContext {
 
     // === Zero-Copy Record Access ===
 
-    /// Get raw bytes for entire record at index
+    /// Get raw bytes for entire record at index (applies effective offset)
     #[inline(always)]
     pub fn get_record_bytes(&self, idx: u64) -> &[u8] {
-        debug_assert!(idx < self.section_layout.record_count, "record index out of bounds");
-        let offset = self.section_layout.records_offset + (idx as usize * self.section_layout.record_size);
+        let actual_idx = idx + self.effective_record_offset;
+        debug_assert!(actual_idx < self.section_layout.record_count, "record index out of bounds");
+        let offset = self.section_layout.records_offset + (actual_idx as usize * self.section_layout.record_size);
         &self.mmap[offset..offset + self.section_layout.record_size]
     }
 
@@ -187,17 +242,18 @@ impl DatasetContext {
         }
     }
 
-    /// Get raw bytes for vector field at record index (zero-copy)
+    /// Get raw bytes for vector field at record index (zero-copy, applies effective offset)
     ///
     /// This is optimized for the common case of accessing the first vector field.
     #[inline(always)]
     pub fn get_vector_bytes(&self, idx: u64) -> &[u8] {
-        debug_assert!(idx < self.section_layout.record_count, "vector index out of bounds");
+        let actual_idx = idx + self.effective_record_offset;
+        debug_assert!(actual_idx < self.section_layout.record_count, "vector index out of bounds");
 
         let vec_offset = self.vector_field_offset.expect("no vector field in schema");
         let vec_len = self.vector_byte_len.expect("no vector field in schema");
 
-        let record_offset = self.section_layout.records_offset + (idx as usize * self.section_layout.record_size);
+        let record_offset = self.section_layout.records_offset + (actual_idx as usize * self.section_layout.record_size);
         let offset = record_offset + vec_offset;
         &self.mmap[offset..offset + vec_len]
     }
@@ -244,17 +300,20 @@ impl DatasetContext {
 
     // === Key Access ===
 
-    /// Get key for record at index
+    /// Get key for record at index (applies effective offset for file-based keys)
     ///
     /// Returns either a generated key from pattern or key from file.
+    /// For generated keys, the index is used directly in the pattern.
+    /// For file-based keys, the effective offset is applied.
     pub fn get_key(&self, idx: u64) -> String {
         if let Some(ref pattern) = self.schema.sections.keys.pattern {
-            // Generate key from pattern
+            // Generate key from pattern - use logical index directly
             pattern.replace("{id}", &idx.to_string())
         } else if let Some(keys_offset) = self.section_layout.keys_offset {
-            // Read key from file
+            // Read key from file - apply effective offset
+            let actual_idx = idx + self.effective_record_offset;
             let entry_size = self.section_layout.keys_entry_size.unwrap();
-            let offset = keys_offset + (idx as usize * entry_size);
+            let offset = keys_offset + (actual_idx as usize * entry_size);
 
             // Check if variable length (has u32 prefix)
             if self.schema.sections.keys.length == Some(super::schema::LengthSpec::Variable) {
@@ -269,7 +328,7 @@ impl DatasetContext {
                 String::from_utf8_lossy(&data[..end]).into_owned()
             }
         } else {
-            // Default pattern
+            // Default pattern - use logical index directly
             format!("key:{}", idx)
         }
     }
@@ -400,21 +459,33 @@ impl DatasetContext {
     /// Get dataset summary string
     pub fn summary(&self) -> String {
         let name = self.schema.metadata.name.as_deref().unwrap_or("unnamed");
+        let schema_count = self.section_layout.record_count;
+        let effective_count = self.num_vectors();
+
+        // Show effective limits if different from schema
+        let records_str = if effective_count != schema_count || self.effective_record_offset > 0 {
+            format!(
+                "{} records (effective: {} at offset {})",
+                schema_count, effective_count, self.effective_record_offset
+            )
+        } else {
+            format!("{} records", schema_count)
+        };
 
         if let Some(dim) = self.vector_dimensions {
             format!(
-                "Dataset '{}': {} records, {} queries, dim={}, record_size={}B",
+                "Dataset '{}': {}, {} queries, dim={}, record_size={}B",
                 name,
-                self.section_layout.record_count,
+                records_str,
                 self.section_layout.query_count,
                 dim,
                 self.section_layout.record_size
             )
         } else {
             format!(
-                "Dataset '{}': {} records, {} queries, record_size={}B",
+                "Dataset '{}': {}, {} queries, record_size={}B",
                 name,
-                self.section_layout.record_count,
+                records_str,
                 self.section_layout.query_count,
                 self.section_layout.record_size
             )
@@ -428,11 +499,11 @@ impl DatasetContext {
 
 impl DataSource for DatasetContext {
     fn num_items(&self) -> u64 {
-        self.section_layout.record_count
+        self.num_vectors() // Use effective count
     }
 
     fn get_item_bytes(&self, idx: u64) -> &[u8] {
-        self.get_record_bytes(idx)
+        self.get_record_bytes(idx) // Already applies offset
     }
 
     fn item_byte_len(&self) -> usize {
@@ -507,5 +578,79 @@ mod tests {
         let pattern = "vec:{id}:data";
         let key = pattern.replace("{id}", "12345");
         assert_eq!(key, "vec:12345:data");
+    }
+
+    #[test]
+    fn test_effective_limits_logic() {
+        // Test the effective limits calculation logic
+        let schema_count = 1000u64;
+
+        // Case 1: No limits (count=0, offset=0)
+        let offset = 0u64.min(schema_count);
+        let remaining = schema_count.saturating_sub(offset);
+        let count = 0u64;
+        let effective_count = if count > 0 && count < remaining {
+            Some(count)
+        } else {
+            None
+        };
+        assert_eq!(offset, 0);
+        assert_eq!(effective_count, None);
+        let result = effective_count.unwrap_or(remaining);
+        assert_eq!(result, 1000);
+
+        // Case 2: Count limit only (count=100, offset=0)
+        let count = 100u64;
+        let effective_count = if count > 0 && count < remaining {
+            Some(count)
+        } else {
+            None
+        };
+        assert_eq!(effective_count, Some(100));
+        let result = effective_count.unwrap_or(remaining);
+        assert_eq!(result, 100);
+
+        // Case 3: Offset only (count=0, offset=200)
+        let offset = 200u64.min(schema_count);
+        let remaining = schema_count.saturating_sub(offset);
+        let count = 0u64;
+        let effective_count = if count > 0 && count < remaining {
+            Some(count)
+        } else {
+            None
+        };
+        assert_eq!(offset, 200);
+        assert_eq!(remaining, 800);
+        assert_eq!(effective_count, None);
+        let result = effective_count.unwrap_or(remaining);
+        assert_eq!(result, 800);
+
+        // Case 4: Both limits (count=100, offset=200)
+        let count = 100u64;
+        let effective_count = if count > 0 && count < remaining {
+            Some(count)
+        } else {
+            None
+        };
+        assert_eq!(effective_count, Some(100));
+        let result = effective_count.unwrap_or(remaining);
+        assert_eq!(result, 100);
+
+        // Case 5: Count exceeds remaining (count=900, offset=200)
+        let count = 900u64;
+        let effective_count = if count > 0 && count < remaining {
+            Some(count)
+        } else {
+            None
+        };
+        assert_eq!(effective_count, None); // 900 >= 800 remaining
+        let result = effective_count.unwrap_or(remaining);
+        assert_eq!(result, 800);
+
+        // Case 6: Offset exceeds schema count
+        let offset = 1500u64.min(schema_count);
+        assert_eq!(offset, 1000);
+        let remaining = schema_count.saturating_sub(offset);
+        assert_eq!(remaining, 0);
     }
 }
