@@ -564,6 +564,25 @@ fn run() -> Result<()> {
                         search_config.set_distance_metric(metric);
                     }
                 }
+
+                // Apply tag/numeric fields from schema when --filtered-search is enabled
+                if config.filtered_search {
+                    // Apply tag field from schema if not already set via CLI
+                    if search_config.tag_field.is_none() {
+                        if let Some(tag_field) = dataset.schema().first_tag_field() {
+                            info!("Using tag field from schema: {}", tag_field);
+                            search_config.tag_field = Some(tag_field.to_string());
+                        }
+                    }
+
+                    // Apply numeric field from schema if not already set via CLI
+                    if search_config.numeric_field.is_none() && search_config.numeric_fields.is_empty() {
+                        if let Some(numeric_field) = dataset.schema().first_numeric_field() {
+                            info!("Using numeric field from schema: {}", numeric_field);
+                            search_config.numeric_field = Some(numeric_field.to_string());
+                        }
+                    }
+                }
             }
 
             Some(dataset)

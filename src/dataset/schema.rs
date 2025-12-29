@@ -453,6 +453,46 @@ impl DatasetSchema {
             8
         }
     }
+
+    /// Get names of all tag fields in the schema
+    pub fn tag_field_names(&self) -> Vec<&str> {
+        self.record
+            .fields
+            .as_ref()
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter(|f| f.field_type == FieldType::Tag)
+                    .map(|f| f.name.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get names of all numeric fields in the schema
+    pub fn numeric_field_names(&self) -> Vec<&str> {
+        self.record
+            .fields
+            .as_ref()
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter(|f| f.field_type == FieldType::Numeric)
+                    .map(|f| f.name.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get the first tag field name (for simple filtered search)
+    pub fn first_tag_field(&self) -> Option<&str> {
+        self.tag_field_names().into_iter().next()
+    }
+
+    /// Get the first numeric field name (for simple filtered search)
+    pub fn first_numeric_field(&self) -> Option<&str> {
+        self.numeric_field_names().into_iter().next()
+    }
 }
 
 /// Schema parsing error
