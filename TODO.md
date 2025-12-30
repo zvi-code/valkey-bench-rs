@@ -52,6 +52,14 @@ This document tracks planned enhancements and feature ideas for the valkey-searc
 
 ## Planned - Core Features
 
+### Keyspace iteration Strategies
+**Status:** planned
+**Description:** Implement various keyspace iteration using https://github.com/zvi-code/keyspace_tracker: sequential, random, subset, zipfian. Keyspace splitting for multiple threads with no overlap and flexible 2 dimentional boundaries. Use keyspace_tracker to track deleted\existing keys and allow combined logic. Enhance with vector space vector-mapper to track existing vectors. Remove the vector-mapper from benchmark and use keyspace_tracker instead.
+**CLI:** `--iteration "subset:1000:5000"`
+**Files:** `src/workload/iteration.rs`
+**Benefits:** Flexible and realistic data access patterns.
+
+
 ### YAML Workload Definition
 **Status:** Planned
 **Priority:** High
