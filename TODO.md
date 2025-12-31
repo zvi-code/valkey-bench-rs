@@ -59,6 +59,10 @@ This document tracks planned enhancements and feature ideas for the valkey-searc
 **Files:** `src/workload/iteration.rs`
 **Benefits:** Flexible and realistic data access patterns.
 
+### Add data verification capability to workloads
+**Status:** Planned
+**Description:** Add capability to verify correctness of return data. Verification at 2 levels: key->valkey verification - the returned value for a key is correct; value verification - the data returned is not corrupted. These capabilities will be provided by allowing users to specity data-content that is key dependent. For example, for key "user:1001", the value is "vector:1001" followed by padding bytes. The verification logic will be implemented in the workload execution engine. And for data verification, various levels of verification may be provided: checksum, hash, full byte-by-byte comparison. There would be supported both in file based data definiton as well as via benchmark arguments. 
+**Benefits:** Ensure data integrity and correctness during benchmarks.
 
 ### YAML Workload Definition
 **Status:** Planned
