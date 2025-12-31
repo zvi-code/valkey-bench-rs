@@ -13,6 +13,12 @@ Key capabilities:
 - **Regression testing**: Reproducible benchmarks with schema-driven datasets for CI/CD pipelines
 - **Cluster diagnostics**: Per-node metrics reveal hotspots and shard imbalances
 
+## Upcoming Features
+
+### Keyspace iteration Strategies
+Implement various keyspace iteration using https://github.com/zvi-code/keyspace_tracker: sequential, random, subset, zipfian. Keyspace splitting for multiple threads with no overlap and flexible 2 dimentional boundaries. Use keyspace_tracker to track deleted\existing keys and allow combined logic. Enhance with vector space vector-mapper to track existing vectors. Remove the vector-mapper from benchmark and use keyspace_tracker instead.
+**Benefits:** Flexible and realistic data access patterns.
+
 ## Features
 
 - **High Performance**: Lock-free architecture with thread-local histograms and atomic counters

@@ -163,6 +163,11 @@ application:
 
 ## Planned - Enhancements
 
+### Reproduce workload from info metrics
+**Status:** Planned
+**Description:** Given Valkey INFO metrics, reproduce the workload in benchmark. I advanced phase, provided info metrics over time allows reproducing time-varying workloads including their over-time behavior.
+**Benefits:** Easier replication of production workloads for testing.
+
 ### CLI Node Selection
 **Status:** Planned
 **Description:** In CLI mode, allow interactive selection of node and direct node queries in cluster mode.
