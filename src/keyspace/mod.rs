@@ -4,6 +4,7 @@
 //!
 //! - **VectorExistenceMap**: Tracks which vector IDs exist in the cluster (replaces ClusterTagMap)
 //! - **ProtectedIds**: Ground truth protection for deletion benchmarks (replaces ProtectedVectorIds)
+//! - **GroundTruthAwareRecall**: Recall computation under deletions (protected or adjusted mode)
 //!
 //! The keyspace_tracker crate provides:
 //! - Sub-nanosecond existence checks via atomic bitmaps
@@ -23,7 +24,7 @@ use crate::workload::key_format::{KeyFormat, DEFAULT_KEY_WIDTH};
 
 // Re-export keyspace_tracker types for direct use
 pub use keyspace_tracker::{
-    AccessDistribution, PrefixGroupsTracker, SamplingConfig, TrackerIterBuilder,
+    AccessDistribution, BitmapSnapshot, PrefixGroupsTracker, SamplingConfig, TrackerIterBuilder,
 };
 
 /// Vector existence tracking using atomic bitmaps
@@ -331,6 +332,348 @@ impl ProtectedIds {
         }
         let existing = self.count_existing_protected(tracker);
         existing as f64 / total as f64
+    }
+}
+
+// =============================================================================
+// Ground Truth Aware Recall
+// =============================================================================
+
+/// Mode for handling ground truth during deletion benchmarks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroundTruthMode {
+    /// Protect ground truth vectors from deletion.
+    /// Recall should remain constant as all GT vectors are preserved.
+    Protected,
+    /// Allow ground truth vectors to be deleted.
+    /// Recall is computed against remaining GT vectors (adjusted recall).
+    Adjusted,
+}
+
+/// Ground truth aware recall computation
+///
+/// Combines a ReferenceSet of ground truth IDs with existence tracking
+/// to support two modes of recall computation under deletion:
+///
+/// 1. **Protected Mode**: GT vectors are never deleted, recall stays constant
+/// 2. **Adjusted Mode**: GT vectors can be deleted, recall computed against remaining
+///
+/// This struct leverages keyspace_tracker's efficient bitmap operations for:
+/// - O(1) GT membership checks
+/// - O(n/64) coverage computation via SIMD
+/// - Lock-free concurrent access
+///
+/// # Example: Protected Mode
+///
+/// ```ignore
+/// use keyspace_tracker::{PrefixTracker, ReferenceSet};
+/// use crate::keyspace::{GroundTruthAwareRecall, GroundTruthMode};
+///
+/// // Build GT reference from dataset
+/// let gt_ids = dataset.get_ground_truth_vector_ids();
+/// let gt_ref = ReferenceSet::from_iter(gt_ids);
+///
+/// // Create tracker and recall calculator
+/// let tracker = PrefixTracker::simple("vec:");
+/// let gt_recall = GroundTruthAwareRecall::new(gt_ref, GroundTruthMode::Protected);
+///
+/// // During deletion, check if ID is protected
+/// for id in ids_to_delete {
+///     if !gt_recall.should_delete(id) {
+///         continue; // Skip GT vectors
+///     }
+///     delete_vector(id);
+///     tracker.remove(id);
+/// }
+///
+/// // Recall unchanged since GT is preserved
+/// ```
+///
+/// # Example: Adjusted Mode
+///
+/// ```ignore
+/// let gt_recall = GroundTruthAwareRecall::new(gt_ref, GroundTruthMode::Adjusted);
+///
+/// // Delete vectors freely (including GT)
+/// for id in ids_to_delete {
+///     delete_vector(id);
+///     tracker.remove(id);
+/// }
+///
+/// // Compute adjusted recall based on surviving GT
+/// let (recall, stats) = gt_recall.compute_recall_with_stats(
+///     query_idx,
+///     &result_ids,
+///     &all_gt_ids,
+///     k,
+///     &tracker
+/// );
+/// ```
+pub struct GroundTruthAwareRecall {
+    /// Reference set containing all ground truth vector IDs
+    gt_reference: ReferenceSet,
+    /// Mode for handling GT during deletion
+    mode: GroundTruthMode,
+    /// Per-query ground truth ID lists (query_idx -> [neighbor_ids])
+    /// Stored as flat array: query_idx * neighbors_per_query
+    query_gt_ids: Vec<u64>,
+    /// Number of neighbors per query
+    neighbors_per_query: usize,
+    /// Number of queries
+    num_queries: u64,
+}
+
+/// Statistics from adjusted recall computation
+#[derive(Debug, Clone, Default)]
+pub struct AdjustedRecallStats {
+    /// Number of GT vectors that still exist
+    pub gt_existing: u64,
+    /// Number of GT vectors that were deleted
+    pub gt_deleted: u64,
+    /// Total GT vectors for this query
+    pub gt_total: u64,
+    /// GT coverage ratio (existing/total)
+    pub gt_coverage: f64,
+    /// The computed recall value
+    pub recall: f64,
+    /// Number of result IDs that matched existing GT
+    pub matches: usize,
+    /// Effective k used (min of k, existing GT, result count)
+    pub effective_k: usize,
+}
+
+impl GroundTruthAwareRecall {
+    /// Create from a ReferenceSet and mode
+    pub fn new(gt_reference: ReferenceSet, mode: GroundTruthMode) -> Self {
+        Self {
+            gt_reference,
+            mode,
+            query_gt_ids: Vec::new(),
+            neighbors_per_query: 0,
+            num_queries: 0,
+        }
+    }
+
+    /// Create with per-query ground truth data
+    ///
+    /// # Arguments
+    /// * `gt_reference` - ReferenceSet of all unique GT IDs
+    /// * `mode` - Protected or Adjusted
+    /// * `query_gt_ids` - Flat array of GT IDs: [q0_n0, q0_n1, ..., q1_n0, ...]
+    /// * `neighbors_per_query` - Number of neighbors per query (k for GT)
+    /// * `num_queries` - Total number of queries
+    pub fn with_query_gt(
+        gt_reference: ReferenceSet,
+        mode: GroundTruthMode,
+        query_gt_ids: Vec<u64>,
+        neighbors_per_query: usize,
+        num_queries: u64,
+    ) -> Self {
+        Self {
+            gt_reference,
+            mode,
+            query_gt_ids,
+            neighbors_per_query,
+            num_queries,
+        }
+    }
+
+    /// Get the mode
+    pub fn mode(&self) -> GroundTruthMode {
+        self.mode
+    }
+
+    /// Check if a vector ID is in the ground truth set
+    #[inline]
+    pub fn is_ground_truth(&self, id: u64) -> bool {
+        self.gt_reference.contains(id)
+    }
+
+    /// Check if a vector should be deleted based on mode
+    ///
+    /// - Protected mode: returns false for GT vectors (don't delete)
+    /// - Adjusted mode: returns true for all vectors (delete freely)
+    #[inline]
+    pub fn should_delete(&self, id: u64) -> bool {
+        match self.mode {
+            GroundTruthMode::Protected => !self.gt_reference.contains(id),
+            GroundTruthMode::Adjusted => true,
+        }
+    }
+
+    /// Get the number of ground truth IDs
+    pub fn gt_count(&self) -> u64 {
+        self.gt_reference.len()
+    }
+
+    /// Compute coverage: how many GT IDs still exist in the tracker
+    pub fn compute_coverage(&self, tracker: &PrefixTracker) -> (u64, u64, f64) {
+        let snapshot = tracker.snapshot();
+        let existing = self.gt_reference.count_existing_in(&snapshot);
+        let total = self.gt_reference.len();
+        let coverage = if total > 0 {
+            existing as f64 / total as f64
+        } else {
+            1.0
+        };
+        (existing, total, coverage)
+    }
+
+    /// Get ground truth IDs for a specific query
+    pub fn get_query_gt(&self, query_idx: u64) -> &[u64] {
+        if self.query_gt_ids.is_empty() || self.neighbors_per_query == 0 {
+            return &[];
+        }
+        let start = (query_idx as usize) * self.neighbors_per_query;
+        let end = start + self.neighbors_per_query;
+        if end <= self.query_gt_ids.len() {
+            &self.query_gt_ids[start..end]
+        } else {
+            &[]
+        }
+    }
+
+    /// Compute recall considering deleted ground truth vectors
+    ///
+    /// # Arguments
+    /// * `query_idx` - The query index
+    /// * `result_ids` - IDs returned from the search
+    /// * `k` - Number of results to consider
+    /// * `tracker` - Tracker to check which vectors still exist
+    ///
+    /// # Returns
+    /// Tuple of (recall_value, adjusted_recall_stats)
+    ///
+    /// # Recall Computation Logic
+    ///
+    /// **Protected Mode**: Standard recall against full GT
+    /// - recall = |result ∩ GT| / min(k, |GT|, |result|)
+    ///
+    /// **Adjusted Mode**: Recall against surviving GT only
+    /// - surviving_gt = {id ∈ GT | tracker.exists(id)}
+    /// - recall = |result ∩ surviving_gt| / min(k, |surviving_gt|, |result|)
+    /// - If all GT deleted: recall = 0 (or 1.0 if vacuously true)
+    pub fn compute_recall_with_stats(
+        &self,
+        query_idx: u64,
+        result_ids: &[u64],
+        k: usize,
+        tracker: &PrefixTracker,
+    ) -> (f64, AdjustedRecallStats) {
+        let gt_ids = self.get_query_gt(query_idx);
+        if gt_ids.is_empty() {
+            return (0.0, AdjustedRecallStats::default());
+        }
+
+        match self.mode {
+            GroundTruthMode::Protected => {
+                // Standard recall - all GT should exist
+                let effective_k = k.min(gt_ids.len()).min(result_ids.len());
+                if effective_k == 0 {
+                    return (0.0, AdjustedRecallStats {
+                        gt_existing: gt_ids.len() as u64,
+                        gt_deleted: 0,
+                        gt_total: gt_ids.len() as u64,
+                        gt_coverage: 1.0,
+                        recall: 0.0,
+                        matches: 0,
+                        effective_k,
+                    });
+                }
+
+                let mut matches = 0;
+                for &result_id in result_ids.iter().take(effective_k) {
+                    if gt_ids[..effective_k].contains(&result_id) {
+                        matches += 1;
+                    }
+                }
+
+                let recall = matches as f64 / effective_k as f64;
+                (recall, AdjustedRecallStats {
+                    gt_existing: gt_ids.len() as u64,
+                    gt_deleted: 0,
+                    gt_total: gt_ids.len() as u64,
+                    gt_coverage: 1.0,
+                    recall,
+                    matches,
+                    effective_k,
+                })
+            }
+            GroundTruthMode::Adjusted => {
+                // Compute recall against surviving GT only
+                let snapshot = tracker.snapshot();
+                
+                // Find surviving GT for this query (within top k)
+                let gt_k = k.min(gt_ids.len());
+                let surviving_gt: Vec<u64> = gt_ids[..gt_k]
+                    .iter()
+                    .filter(|&&id| snapshot.test(id as usize))
+                    .copied()
+                    .collect();
+
+                let gt_existing = surviving_gt.len() as u64;
+                let gt_deleted = gt_k as u64 - gt_existing;
+                let gt_coverage = if gt_k > 0 {
+                    gt_existing as f64 / gt_k as f64
+                } else {
+                    1.0
+                };
+
+                // If no GT survives, return special case
+                if surviving_gt.is_empty() {
+                    return (0.0, AdjustedRecallStats {
+                        gt_existing: 0,
+                        gt_deleted,
+                        gt_total: gt_k as u64,
+                        gt_coverage: 0.0,
+                        recall: 0.0,
+                        matches: 0,
+                        effective_k: 0,
+                    });
+                }
+
+                // Compute recall against surviving GT
+                let effective_k = k.min(surviving_gt.len()).min(result_ids.len());
+                let mut matches = 0;
+                for &result_id in result_ids.iter().take(effective_k) {
+                    if surviving_gt.contains(&result_id) {
+                        matches += 1;
+                    }
+                }
+
+                let recall = matches as f64 / effective_k as f64;
+                (recall, AdjustedRecallStats {
+                    gt_existing,
+                    gt_deleted,
+                    gt_total: gt_k as u64,
+                    gt_coverage,
+                    recall,
+                    matches,
+                    effective_k,
+                })
+            }
+        }
+    }
+
+    /// Simple recall computation (without detailed stats)
+    pub fn compute_recall(
+        &self,
+        query_idx: u64,
+        result_ids: &[u64],
+        k: usize,
+        tracker: &PrefixTracker,
+    ) -> f64 {
+        self.compute_recall_with_stats(query_idx, result_ids, k, tracker).0
+    }
+
+    /// Get IDs that should not be deleted (for Protected mode)
+    pub fn protected_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.gt_reference.iter()
+    }
+
+    /// Get reference to the underlying ReferenceSet
+    pub fn reference_set(&self) -> &ReferenceSet {
+        &self.gt_reference
     }
 }
 
@@ -788,4 +1131,157 @@ mod tests {
             assert!(tracker.exists(id), "Protected ID {} should still exist", id);
         }
     }
+
+    /// Tests GroundTruthAwareRecall in Protected mode
+    #[test]
+    fn test_gt_aware_recall_protected_mode() {
+        // Setup: Create tracker with all vectors existing
+        let config = TrackerConfig::simple("vec:").with_max_id(100);
+        let tracker = PrefixTracker::new(config);
+        for id in 0..100 {
+            tracker.add(id);
+        }
+
+        // Ground truth for 3 queries, 5 neighbors each
+        // Query 0: [0, 1, 2, 3, 4]
+        // Query 1: [10, 11, 12, 13, 14]
+        // Query 2: [20, 21, 22, 23, 24]
+        let query_gt_ids: Vec<u64> = vec![
+            0, 1, 2, 3, 4,     // Query 0
+            10, 11, 12, 13, 14, // Query 1
+            20, 21, 22, 23, 24, // Query 2
+        ];
+        let all_gt: Vec<u64> = query_gt_ids.clone();
+        let gt_ref = ReferenceSet::from_iter(all_gt);
+
+        let gt_recall = GroundTruthAwareRecall::with_query_gt(
+            gt_ref,
+            GroundTruthMode::Protected,
+            query_gt_ids,
+            5, // neighbors_per_query
+            3, // num_queries
+        );
+
+        // Test: Protected mode should NOT allow GT deletion
+        assert!(!gt_recall.should_delete(0), "GT ID 0 should not be deleted in protected mode");
+        assert!(!gt_recall.should_delete(10), "GT ID 10 should not be deleted in protected mode");
+        assert!(gt_recall.should_delete(5), "Non-GT ID 5 should be deleteable");
+        assert!(gt_recall.should_delete(99), "Non-GT ID 99 should be deleteable");
+
+        // Test recall computation with perfect results
+        let result_ids = vec![0, 1, 2, 3, 4]; // Perfect match for query 0
+        let (recall, stats) = gt_recall.compute_recall_with_stats(0, &result_ids, 5, &tracker);
+        assert!((recall - 1.0).abs() < 0.001, "Perfect results should have recall 1.0");
+        assert_eq!(stats.gt_existing, 5);
+        assert_eq!(stats.gt_deleted, 0);
+        assert!((stats.gt_coverage - 1.0).abs() < 0.001);
+
+        // Test recall with partial match
+        let result_ids = vec![0, 1, 2, 99, 98]; // 3 correct, 2 wrong
+        let (recall, stats) = gt_recall.compute_recall_with_stats(0, &result_ids, 5, &tracker);
+        assert!((recall - 0.6).abs() < 0.001, "3/5 correct should be 0.6 recall");
+        assert_eq!(stats.matches, 3);
+    }
+
+    /// Tests GroundTruthAwareRecall in Adjusted mode
+    #[test]
+    fn test_gt_aware_recall_adjusted_mode() {
+        // Setup: Create tracker with some vectors DELETED
+        let config = TrackerConfig::simple("vec:").with_max_id(100);
+        let tracker = PrefixTracker::new(config);
+        // Only add even IDs (0, 2, 4, ... 98) - odd IDs are "deleted"
+        for id in (0..100).step_by(2) {
+            tracker.add(id);
+        }
+
+        // Ground truth for query 0: [0, 1, 2, 3, 4]
+        // After deletion: only [0, 2, 4] exist (IDs 1, 3 deleted)
+        let query_gt_ids: Vec<u64> = vec![0, 1, 2, 3, 4];
+        let gt_ref = ReferenceSet::from_iter(query_gt_ids.clone());
+
+        let gt_recall = GroundTruthAwareRecall::with_query_gt(
+            gt_ref,
+            GroundTruthMode::Adjusted,
+            query_gt_ids,
+            5, // neighbors_per_query
+            1, // num_queries
+        );
+
+        // Test: Adjusted mode allows deletion of any vector
+        assert!(gt_recall.should_delete(0), "All IDs deleteable in adjusted mode");
+        assert!(gt_recall.should_delete(1), "All IDs deleteable in adjusted mode");
+
+        // Compute recall: should be against surviving GT only
+        // Surviving GT: [0, 2, 4] (3 vectors)
+        // Perfect result: return these 3
+        let result_ids = vec![0, 2, 4];
+        let (recall, stats) = gt_recall.compute_recall_with_stats(0, &result_ids, 5, &tracker);
+        
+        assert_eq!(stats.gt_existing, 3, "Should have 3 surviving GT vectors");
+        assert_eq!(stats.gt_deleted, 2, "Should have 2 deleted GT vectors");
+        assert!((stats.gt_coverage - 0.6).abs() < 0.001, "Coverage should be 3/5 = 0.6");
+        assert!((recall - 1.0).abs() < 0.001, "All surviving GT found = recall 1.0");
+        assert_eq!(stats.matches, 3);
+        assert_eq!(stats.effective_k, 3);
+
+        // Partial match: return some surviving GT
+        let result_ids = vec![0, 2, 99]; // 2 of 3 surviving GT
+        let (recall, stats) = gt_recall.compute_recall_with_stats(0, &result_ids, 5, &tracker);
+        assert!((recall - 2.0/3.0).abs() < 0.001, "2/3 surviving GT = recall ~0.667");
+        assert_eq!(stats.matches, 2);
+    }
+
+    /// Tests GroundTruthAwareRecall edge case: all GT deleted
+    #[test]
+    fn test_gt_aware_recall_all_gt_deleted() {
+        // Setup: No vectors exist (all deleted)
+        let config = TrackerConfig::simple("vec:").with_max_id(100);
+        let tracker = PrefixTracker::new(config);
+        // Don't add any vectors
+
+        let query_gt_ids: Vec<u64> = vec![0, 1, 2, 3, 4];
+        let gt_ref = ReferenceSet::from_iter(query_gt_ids.clone());
+
+        let gt_recall = GroundTruthAwareRecall::with_query_gt(
+            gt_ref,
+            GroundTruthMode::Adjusted,
+            query_gt_ids,
+            5,
+            1,
+        );
+
+        let result_ids = vec![0, 2, 4]; // Results don't matter - all GT deleted
+        let (recall, stats) = gt_recall.compute_recall_with_stats(0, &result_ids, 5, &tracker);
+
+        assert_eq!(stats.gt_existing, 0, "No GT should exist");
+        assert_eq!(stats.gt_deleted, 5, "All GT should be deleted");
+        assert!((stats.gt_coverage - 0.0).abs() < 0.001, "Coverage should be 0");
+        assert!((recall - 0.0).abs() < 0.001, "Recall undefined/0 when all GT deleted");
+        assert_eq!(stats.effective_k, 0);
+    }
+
+    /// Tests coverage computation
+    #[test]
+    fn test_gt_coverage_computation() {
+        let config = TrackerConfig::simple("vec:").with_max_id(100);
+        let tracker = PrefixTracker::new(config);
+        
+        // Add vectors 0-49
+        for id in 0..50 {
+            tracker.add(id);
+        }
+
+        // GT includes vectors 0-9 and 90-99
+        let gt_ids: Vec<u64> = (0..10).chain(90..100).collect();
+        let gt_ref = ReferenceSet::from_iter(gt_ids);
+
+        let gt_recall = GroundTruthAwareRecall::new(gt_ref, GroundTruthMode::Adjusted);
+
+        let (existing, total, coverage) = gt_recall.compute_coverage(&tracker);
+        
+        assert_eq!(total, 20, "Total GT should be 20");
+        assert_eq!(existing, 10, "Only 0-9 exist from GT");
+        assert!((coverage - 0.5).abs() < 0.001, "Coverage should be 50%");
+    }
 }
+

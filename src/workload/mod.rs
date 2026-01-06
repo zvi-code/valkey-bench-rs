@@ -22,8 +22,9 @@ pub use command_template::{CommandTemplate, TemplateArg};
 pub use context::{
     create_workload_context, create_workload_context_with_iteration,
     create_workload_context_with_shared_tracker, AddressableContext,
-    SimpleContext, VectorDeleteContext, VectorLoadContext, VectorQueryContext,
-    VectorUpdateContext, WorkloadContext, WorkloadMetrics,
+    AdjustedRecallAggregator, SimpleContext, VectorDeleteContext, VectorLoadContext,
+    VectorQueryContext, VectorQueryWithDeletesContext, VectorUpdateContext,
+    WorkloadContext, WorkloadMetrics,
 };
 pub use iteration::{ExistenceFilter, IterationState, IterationStrategy, KeyspaceIterator};
 pub use lifecycle::{LegacyWorkloadAdapter, PrepareResult, Workload};

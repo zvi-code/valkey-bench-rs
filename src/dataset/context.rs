@@ -505,6 +505,75 @@ impl DatasetContext {
         keyspace_tracker::ReferenceSet::from_iter(ids)
     }
 
+    /// Build a GroundTruthAwareRecall for delete-then-query benchmarks
+    ///
+    /// This creates a recall calculator that understands ground truth and can
+    /// operate in two modes:
+    ///
+    /// - **Protected**: GT vectors are never deleted, recall stays constant
+    /// - **Adjusted**: GT vectors can be deleted, recall computed against remaining
+    ///
+    /// # Arguments
+    /// * `mode` - GroundTruthMode::Protected or GroundTruthMode::Adjusted
+    /// * `k` - Number of neighbors to consider (limits GT per query)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use crate::keyspace::GroundTruthMode;
+    ///
+    /// let dataset = DatasetContext::open("schema.yaml", "data.bin")?;
+    /// let gt_recall = dataset.build_gt_aware_recall(GroundTruthMode::Adjusted, 10);
+    ///
+    /// // After deletions, compute adjusted recall
+    /// let (recall, stats) = gt_recall.compute_recall_with_stats(
+    ///     query_idx, &result_ids, 10, &tracker
+    /// );
+    /// println!("Recall: {:.3} (GT coverage: {:.1}%)", recall, stats.gt_coverage * 100.0);
+    /// ```
+    pub fn build_gt_aware_recall(
+        &self,
+        mode: crate::keyspace::GroundTruthMode,
+        k: usize,
+    ) -> crate::keyspace::GroundTruthAwareRecall {
+        // Build reference set from all unique GT IDs (limited to k per query)
+        let gt_reference = self.build_reference_set_k(k);
+        
+        // Build per-query GT array
+        let neighbors_per_query = k.min(self.section_layout.neighbors_per_query);
+        let num_queries = self.section_layout.query_count;
+        let mut query_gt_ids = Vec::with_capacity((num_queries as usize) * neighbors_per_query);
+        
+        for query_idx in 0..num_queries {
+            if self.section_layout.gt_id_size == 8 {
+                let neighbors = self.get_neighbor_ids(query_idx);
+                for &id in neighbors.iter().take(neighbors_per_query) {
+                    query_gt_ids.push(id);
+                }
+                // Pad if needed
+                for _ in neighbors.len()..neighbors_per_query {
+                    query_gt_ids.push(u64::MAX);
+                }
+            } else {
+                let neighbors = self.get_neighbor_ids_u32(query_idx);
+                for &id in neighbors.iter().take(neighbors_per_query) {
+                    query_gt_ids.push(id as u64);
+                }
+                for _ in neighbors.len()..neighbors_per_query {
+                    query_gt_ids.push(u64::MAX);
+                }
+            }
+        }
+        
+        crate::keyspace::GroundTruthAwareRecall::with_query_gt(
+            gt_reference,
+            mode,
+            query_gt_ids,
+            neighbors_per_query,
+            num_queries,
+        )
+    }
+
     // === Statistics ===
 
     /// Get total memory mapped size in bytes

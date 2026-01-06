@@ -803,6 +803,279 @@ impl WorkloadContext for VectorQueryContext {
 }
 
 // =============================================================================
+// VectorQueryWithDeletesContext - For VecQuery after deletions with GT-aware recall
+// =============================================================================
+
+/// Context for vector query workloads after deletion, with ground-truth aware recall
+///
+/// This context extends VectorQueryContext with the ability to compute recall
+/// while accounting for deleted ground truth vectors. It supports two modes:
+///
+/// - **Protected Mode**: Ground truth vectors are never deleted (use with VectorDeleteContext
+///   that has protected_ids). Recall computation is standard.
+///
+/// - **Adjusted Mode**: Ground truth vectors may be deleted. Recall is computed against
+///   only the surviving ground truth vectors.
+///
+/// # Example: Delete-then-Query Benchmark Flow
+///
+/// ```ignore
+/// // 1. Create GT-aware recall calculator
+/// let gt_recall = dataset.build_gt_aware_recall(GroundTruthMode::Adjusted, k);
+///
+/// // 2. Create existence tracker for vectors
+/// let existence_map = Arc::new(VectorExistenceMap::new("vec:", num_vectors, true));
+/// // ... populate from scan ...
+///
+/// // 3. Run deletions (with or without GT protection)
+/// // ... VectorDeleteContext runs ...
+///
+/// // 4. Create query context with GT-aware recall
+/// let query_ctx = VectorQueryWithDeletesContext::new(
+///     dataset, k, key_prefix, gt_recall, existence_map.tracker().clone()
+/// );
+///
+/// // 5. During queries, recall is computed against surviving GT
+/// ```
+pub struct VectorQueryWithDeletesContext {
+    dataset: Arc<DatasetContext>,
+    recall_stats: RecallStats,
+    /// Aggregated adjusted recall stats for reporting
+    adjusted_stats: AdjustedRecallAggregator,
+    k: usize,
+    key_prefix: String,
+    /// Tracker for query iteration (prefix: "query_vec:<dataset-name>:")
+    query_tracker: Arc<PrefixTracker>,
+    /// Iteration strategy for queries
+    strategy: IterationStrategy,
+    /// Ground truth aware recall calculator
+    gt_recall: Arc<crate::keyspace::GroundTruthAwareRecall>,
+    /// Existence tracker for vectors (to check which GT still exist)
+    vector_tracker: Arc<PrefixTracker>,
+}
+
+/// Aggregator for adjusted recall statistics
+#[derive(Debug, Clone, Default)]
+pub struct AdjustedRecallAggregator {
+    pub total_queries: u64,
+    pub total_gt_existing: u64,
+    pub total_gt_deleted: u64,
+    pub total_matches: u64,
+    pub sum_recall: f64,
+    pub sum_coverage: f64,
+    pub min_coverage: f64,
+    pub max_coverage: f64,
+}
+
+impl AdjustedRecallAggregator {
+    pub fn new() -> Self {
+        Self {
+            min_coverage: 1.0,
+            max_coverage: 0.0,
+            ..Default::default()
+        }
+    }
+
+    pub fn record(&mut self, stats: &crate::keyspace::AdjustedRecallStats) {
+        self.total_queries += 1;
+        self.total_gt_existing += stats.gt_existing;
+        self.total_gt_deleted += stats.gt_deleted;
+        self.total_matches += stats.matches as u64;
+        self.sum_recall += stats.recall;
+        self.sum_coverage += stats.gt_coverage;
+        self.min_coverage = self.min_coverage.min(stats.gt_coverage);
+        self.max_coverage = self.max_coverage.max(stats.gt_coverage);
+    }
+
+    pub fn avg_recall(&self) -> f64 {
+        if self.total_queries > 0 {
+            self.sum_recall / self.total_queries as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn avg_coverage(&self) -> f64 {
+        if self.total_queries > 0 {
+            self.sum_coverage / self.total_queries as f64
+        } else {
+            1.0
+        }
+    }
+
+    pub fn coverage_range(&self) -> (f64, f64) {
+        (self.min_coverage, self.max_coverage)
+    }
+}
+
+impl VectorQueryWithDeletesContext {
+    /// Create a new context for querying after deletions
+    ///
+    /// # Arguments
+    /// * `dataset` - Dataset with queries and ground truth
+    /// * `k` - Number of results to request/verify
+    /// * `key_prefix` - Key prefix for parsing result IDs
+    /// * `gt_recall` - Ground truth aware recall calculator
+    /// * `vector_tracker` - Tracker of existing vectors (for adjusted recall)
+    pub fn new(
+        dataset: Arc<DatasetContext>,
+        k: usize,
+        key_prefix: String,
+        gt_recall: Arc<crate::keyspace::GroundTruthAwareRecall>,
+        vector_tracker: Arc<PrefixTracker>,
+    ) -> Self {
+        Self::with_strategy(
+            dataset,
+            k,
+            key_prefix,
+            gt_recall,
+            vector_tracker,
+            IterationStrategy::Sequential,
+        )
+    }
+
+    /// Create with custom iteration strategy
+    pub fn with_strategy(
+        dataset: Arc<DatasetContext>,
+        k: usize,
+        key_prefix: String,
+        gt_recall: Arc<crate::keyspace::GroundTruthAwareRecall>,
+        vector_tracker: Arc<PrefixTracker>,
+        strategy: IterationStrategy,
+    ) -> Self {
+        let prefix = format!("query_vec:{}:", dataset.name());
+        let num_queries = dataset.num_queries();
+        let config = TrackerConfig::simple(&prefix)
+            .with_max_id(num_queries)
+            .with_initial_capacity(num_queries as usize);
+        let query_tracker = Arc::new(PrefixTracker::new(config));
+
+        Self {
+            dataset,
+            recall_stats: RecallStats::new(),
+            adjusted_stats: AdjustedRecallAggregator::new(),
+            k,
+            key_prefix,
+            query_tracker,
+            strategy,
+            gt_recall,
+            vector_tracker,
+        }
+    }
+
+    /// Get GT coverage statistics before running queries
+    pub fn gt_coverage(&self) -> (u64, u64, f64) {
+        self.gt_recall.compute_coverage(&self.vector_tracker)
+    }
+
+    /// Get aggregated adjusted recall statistics
+    pub fn adjusted_stats(&self) -> &AdjustedRecallAggregator {
+        &self.adjusted_stats
+    }
+
+    /// Get the GT mode
+    pub fn gt_mode(&self) -> crate::keyspace::GroundTruthMode {
+        self.gt_recall.mode()
+    }
+}
+
+impl WorkloadContext for VectorQueryWithDeletesContext {
+    fn claim_next_id(&self) -> Option<u64> {
+        let num_queries = self.dataset.num_queries();
+
+        let id = match &self.strategy {
+            IterationStrategy::Sequential => self
+                .query_tracker
+                .iter()
+                .continue_write()
+                .next()
+                .map(|(id, _)| id),
+            IterationStrategy::Random { seed } => self
+                .query_tracker
+                .iter()
+                .seed(*seed)
+                .continue_write()
+                .next()
+                .map(|(id, _)| id),
+            IterationStrategy::Zipfian { skew, seed } => self
+                .query_tracker
+                .iter()
+                .distribution(AccessDistribution::Zipfian { skew: *skew })
+                .seed(*seed)
+                .continue_write()
+                .next()
+                .map(|(id, _)| id),
+            IterationStrategy::Subset { start, end, inner } => {
+                let base = self.query_tracker.iter().id_range(*start, *end);
+                match inner.as_ref() {
+                    IterationStrategy::Sequential => {
+                        base.continue_write().next().map(|(id, _)| id)
+                    }
+                    IterationStrategy::Random { seed } => {
+                        base.seed(*seed).continue_write().next().map(|(id, _)| id)
+                    }
+                    _ => base.continue_write().next().map(|(id, _)| id),
+                }
+            }
+        };
+
+        id.map(|i| i % num_queries)
+    }
+
+    fn next_dataset_idx(&self) -> Option<u64> {
+        None
+    }
+
+    fn get_query_bytes(&self, idx: u64) -> Option<&[u8]> {
+        Some(self.dataset.get_query_bytes(idx))
+    }
+
+    fn get_vector_bytes(&self, _idx: u64) -> Option<&[u8]> {
+        None
+    }
+
+    fn compute_and_record_recall(&mut self, query_idx: u64, response: &RespValue) {
+        let doc_ids = parse_search_response(response);
+        let result_ids = extract_numeric_ids(&doc_ids, &self.key_prefix);
+
+        // Use GT-aware recall computation
+        let (recall, stats) = self.gt_recall.compute_recall_with_stats(
+            query_idx,
+            &result_ids,
+            self.k,
+            &self.vector_tracker,
+        );
+
+        // Record both standard and adjusted stats
+        self.recall_stats.record(recall);
+        self.adjusted_stats.record(&stats);
+    }
+
+    fn take_metrics(&mut self) -> WorkloadMetrics {
+        let stats = std::mem::take(&mut self.recall_stats);
+        self.recall_stats = RecallStats::new();
+        // Note: adjusted_stats is preserved for final reporting
+        WorkloadMetrics::Recall(stats)
+    }
+
+    fn num_items(&self) -> u64 {
+        self.dataset.num_vectors()
+    }
+
+    fn num_queries(&self) -> u64 {
+        self.dataset.num_queries()
+    }
+
+    fn uses_dataset_keys(&self) -> bool {
+        true
+    }
+
+    fn key_is_claimed_id(&self) -> bool {
+        false
+    }
+}
+
+// =============================================================================
 // VectorDeleteContext - For VecDelete with ground truth protection
 // =============================================================================
 
