@@ -1,0 +1,15 @@
+═══════════════════════════════════════════════════════════════════════════════
+  SIMPLE BASELINE BENCHMARK REPORT
+  Generated: Thu Jan  1 14:08:36 UTC 2026
+═══════════════════════════════════════════════════════════════════════════════
+
+Configuration:
+  Host:       zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379
+  Mode:       quick
+  Cluster:    --cluster
+  Keyspace:   200000 keys
+  Value size: 500 bytes
+  Max QPS:    400 clients, 10 threads
+
+Initial state: DBSIZE=0, Memory=2.76G
+Memory after prefill: 2.87G

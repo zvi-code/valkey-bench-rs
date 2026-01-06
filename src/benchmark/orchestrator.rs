@@ -15,19 +15,23 @@ use super::counters::GlobalCounters;
 use super::event_worker::{EventWorker, EventWorkerResult, RecallStats, WeightedTemplates};
 use crate::client::{ConnectionFactory, ControlPlane, ControlPlaneExt};
 use crate::cluster::{
-    build_vector_id_mappings, create_backend, AutoDetectBackend, ClusterBackend, ClusterScanConfig,
-    ClusterTagMap, ClusterTopology, ProtectedVectorIds, TopologyManager,
+    create_backend, AutoDetectBackend, ClusterBackend, ClusterTopology, TopologyManager,
 };
 use crate::config::BenchmarkConfig;
 use crate::dataset::DatasetContext;
+use crate::keyspace::{
+    build_vector_id_mappings, ClusterScanConfig, ProtectedIds, VectorExistenceMap,
+};
 use crate::metrics::info_fields::{default_info_fields, default_search_info_fields, InfoFieldType};
 use crate::metrics::reporter::{BenchmarkResults, OutputFormat};
 use crate::metrics::snapshot::{compare_snapshots, print_per_node_matrix, ClusterSnapshot, SnapshotBuilder};
 use crate::metrics::{BackfillWaitConfig, EngineType, MetricsCollector, MetricsReporter, NodeMetrics};
 use crate::utils::Result;
 use crate::workload::{
-    create_index, create_template, create_workload_context_with_iteration, drop_index, get_index_info,
-    index_exists, NumericFieldSet, ParallelWorkload, SimpleContext, Workload, WorkloadType,
+    create_index, create_template, create_workload_context_with_iteration,
+    create_workload_context_with_shared_tracker, drop_index, get_index_info,
+    index_exists, IterationStrategy, NumericFieldSet, ParallelWorkload, SimpleContext, Workload,
+    WorkloadContext, WorkloadType,
 };
 
 /// Keyspace hit/miss statistics from INFO stats
@@ -175,10 +179,10 @@ pub struct Orchestrator {
     cluster_topology: Option<ClusterTopology>,
     /// Shared topology manager for dynamic cluster updates
     topology_manager: Option<Arc<TopologyManager>>,
-    /// Cluster tag map for vector ID to node routing (for vec-query with existing data)
-    cluster_tag_map: Option<Arc<ClusterTagMap>>,
+    /// Vector existence map for tracking which vectors exist (for vec-query with existing data)
+    existence_map: Option<Arc<VectorExistenceMap>>,
     /// Protected vector IDs (ground truth) for deletion benchmarks
-    protected_ids: Option<Arc<ProtectedVectorIds>>,
+    protected_ids: Option<Arc<ProtectedIds>>,
     /// Backend abstraction for engine-specific behavior (ElastiCache, MemoryDB, Valkey OSS)
     backend: Arc<dyn ClusterBackend>,
 }
@@ -221,7 +225,7 @@ impl Orchestrator {
             dataset: None,
             cluster_topology,
             topology_manager,
-            cluster_tag_map: None,
+            existence_map: None,
             protected_ids: None,
             backend,
         })
@@ -267,7 +271,7 @@ impl Orchestrator {
             dataset: None,
             cluster_topology: topology,
             topology_manager,
-            cluster_tag_map: None,
+            existence_map: None,
             protected_ids: None,
             backend,
         })
@@ -278,9 +282,9 @@ impl Orchestrator {
         self.cluster_topology.as_ref()
     }
 
-    /// Set an existing cluster tag map (for sharing across optimization iterations)
-    pub fn set_cluster_tag_map(&mut self, tag_map: Arc<ClusterTagMap>) {
-        self.cluster_tag_map = Some(tag_map);
+    /// Set an existing existence map (for sharing across optimization iterations)
+    pub fn set_existence_map(&mut self, existence_map: Arc<VectorExistenceMap>) {
+        self.existence_map = Some(existence_map);
     }
 
     /// Build protected vector IDs from dataset ground truth
@@ -294,7 +298,7 @@ impl Orchestrator {
 
         let ground_truth_ids = dataset.get_ground_truth_vector_ids();
         let protected_count = ground_truth_ids.len();
-        let protected = ProtectedVectorIds::new(ground_truth_ids, dataset.num_vectors());
+        let protected = ProtectedIds::new(ground_truth_ids, dataset.num_vectors());
 
         if !self.config.quiet {
             println!(
@@ -312,12 +316,12 @@ impl Orchestrator {
     }
 
     /// Get the protected vector IDs (for sharing across orchestrators)
-    pub fn protected_ids(&self) -> Option<Arc<ProtectedVectorIds>> {
+    pub fn protected_ids(&self) -> Option<Arc<ProtectedIds>> {
         self.protected_ids.clone()
     }
 
     /// Set protected vector IDs (for sharing across optimization iterations)
-    pub fn set_protected_ids(&mut self, protected: Arc<ProtectedVectorIds>) {
+    pub fn set_protected_ids(&mut self, protected: Arc<ProtectedIds>) {
         self.protected_ids = Some(protected);
     }
 
@@ -573,18 +577,18 @@ impl Orchestrator {
         KeyspaceStats { hits, misses }
     }
 
-    /// Build cluster tag map by scanning cluster for existing vector keys
+    /// Build vector existence map by scanning cluster for existing vector keys
     ///
     /// This is used for vec-query with existing data to:
     /// 1. Know which vectors exist in the cluster
-    /// 2. Map vector IDs to their cluster tags for proper routing
-    /// 3. Validate recall only against vectors that actually exist
-    pub fn build_cluster_tag_map(&mut self) -> Result<()> {
+    /// 2. Validate recall only against vectors that actually exist
+    /// 3. Support partial prefill by skipping existing vectors
+    pub fn build_existence_map(&mut self) -> Result<()> {
         let search_config = match &self.config.search_config {
             Some(cfg) => cfg,
             None => {
                 if !self.config.quiet {
-                    info!("No search config - skipping cluster tag map");
+                    info!("No search config - skipping existence map");
                 }
                 return Ok(());
             }
@@ -601,12 +605,12 @@ impl Orchestrator {
 
         if !self.config.quiet {
             info!(
-                "Building cluster tag map for prefix '{}' (capacity: {}, cluster: {})",
+                "Building existence map for prefix '{}' (capacity: {}, cluster: {})",
                 search_config.prefix, capacity, is_cluster
             );
         }
 
-        let tag_map = Arc::new(ClusterTagMap::new(
+        let existence_map = Arc::new(VectorExistenceMap::new(
             &search_config.prefix,
             capacity,
             is_cluster,
@@ -623,34 +627,34 @@ impl Orchestrator {
                 show_progress: !self.config.quiet,
             };
 
-            match build_vector_id_mappings(&tag_map, &nodes, &scan_config) {
+            match build_vector_id_mappings(&existence_map, &nodes, &scan_config) {
                 Ok(results) => {
                     if !self.config.quiet {
                         info!(
-                            "Cluster tag map built: {} vectors mapped from {} keys",
-                            tag_map.count(),
+                            "Existence map built: {} vectors mapped from {} keys",
+                            existence_map.count(),
                             results.total_keys
                         );
                     }
                 }
                 Err(e) => {
                     return Err(crate::utils::BenchmarkError::Config(format!(
-                        "Failed to build cluster tag map: {}",
+                        "Failed to build existence map: {}",
                         e
                     )));
                 }
             }
         } else if !self.config.quiet {
-            info!("Standalone mode - cluster tag map will not route by node");
+            info!("Standalone mode - existence map will track local vectors");
         }
 
-        self.cluster_tag_map = Some(tag_map);
+        self.existence_map = Some(existence_map);
         Ok(())
     }
 
-    /// Get cluster tag map
-    pub fn cluster_tag_map(&self) -> Option<Arc<ClusterTagMap>> {
-        self.cluster_tag_map.clone()
+    /// Get existence map
+    pub fn existence_map(&self) -> Option<Arc<VectorExistenceMap>> {
+        self.existence_map.clone()
     }
 
     /// Report progress during benchmark
@@ -771,12 +775,12 @@ impl Orchestrator {
     /// Run a single benchmark test using event-driven I/O (like C's ae)
     pub fn run_test_event(&self, workload: WorkloadType) -> Result<BenchmarkResult> {
         // For vec-load with partial prefill, calculate actual vectors to load
-        let effective_requests = if matches!(workload, WorkloadType::VecLoad) {
-            if let Some(ref tag_map) = self.cluster_tag_map {
-                tag_map.reset_unmapped_counter();
+        let _effective_requests = if matches!(workload, WorkloadType::VecLoad) {
+            if let Some(ref existence_map) = self.existence_map {
+                existence_map.reset_unmapped_counter();
 
                 // Calculate vectors to actually load (skip existing)
-                let already_mapped = tag_map.count();
+                let already_mapped = existence_map.count();
                 let dataset_size = self.dataset.as_ref().map(|ds| ds.num_vectors()).unwrap_or(0);
                 let requested = self.effective_requests().min(dataset_size);
                 let to_load = requested.saturating_sub(already_mapped);
@@ -828,11 +832,11 @@ impl Orchestrator {
         // Build command buffer for pipeline
         let command_buffer = template.build(self.config.pipeline as usize);
 
-        // Create global counters (duration-based or request-count based)
+        // Create global counters (duration-based or iterator-driven)
         let counters = Arc::new(if let Some(duration) = self.config.duration_secs {
             GlobalCounters::with_duration(duration)
         } else {
-            GlobalCounters::with_requests(effective_requests)
+            GlobalCounters::new() // Request count driven by iterator exhaustion
         });
 
         // Get addresses for workers
@@ -892,6 +896,46 @@ impl Orchestrator {
             .map(|sc| sc.numeric_fields.clone())
             .unwrap_or_default();
 
+        // For simple workloads (SET, GET, etc.), determine if we need shared tracker
+        let total_workers = self.config.threads as usize;
+        let is_write_workload = workload.is_write();
+        let is_simple_workload = matches!(
+            workload,
+            WorkloadType::Set | WorkloadType::Get | WorkloadType::Incr | 
+            WorkloadType::Ping | WorkloadType::Lpush | WorkloadType::Rpush | 
+            WorkloadType::Lpop | WorkloadType::Rpop | WorkloadType::Sadd |
+            WorkloadType::Spop | WorkloadType::Hset | WorkloadType::Zadd |
+            WorkloadType::Zpopmin | WorkloadType::Lrange100 | WorkloadType::Lrange300 |
+            WorkloadType::Lrange500 | WorkloadType::Lrange600 | WorkloadType::Mset
+        );
+
+        // Parse iteration strategy once
+        let strategy = self.config.iteration.as_deref()
+            .and_then(|s| IterationStrategy::parse(s).ok())
+            .unwrap_or_else(|| {
+                if self.config.sequential {
+                    IterationStrategy::Sequential
+                } else {
+                    IterationStrategy::Random { seed: self.config.seed }
+                }
+            });
+
+        // Calculate request limits for workers
+        // For duration mode (None), workers iterate until time expires
+        // For count mode, distribute requests across workers
+        let total_requests = if self.config.duration_secs.is_some() {
+            None // Duration mode - no request limit
+        } else {
+            Some(self.effective_requests())
+        };
+
+        // Create shared tracker for write workloads (all workers share the same atomic cursor)
+        let shared_tracker = if is_simple_workload && is_write_workload {
+            Some(SimpleContext::create_shared_tracker(self.config.keyspace_len))
+        } else {
+            None
+        };
+
         for worker_id in 0..self.config.threads as usize {
             let config = Arc::clone(&self.config);
             let counters = Arc::clone(&counters);
@@ -901,21 +945,76 @@ impl Orchestrator {
             let worker_tag_dist = tag_distributions.clone();
             let worker_numeric_fields = numeric_fields.clone();
 
-            // Create workload context for this worker
-            let workload_ctx = create_workload_context_with_iteration(
-                workload,
-                self.dataset.clone(),
-                self.cluster_tag_map.clone(),
-                self.protected_ids.clone(),
-                worker_tag_dist,
-                worker_numeric_fields,
-                self.config.keyspace_len,
-                self.config.sequential,
-                self.config.seed.wrapping_add(worker_id as u64),
-                k,
-                key_prefix,
-                self.config.iteration.as_deref(),
-            );
+            // Create workload context based on workload type
+            let workload_ctx: Box<dyn WorkloadContext + Send> = if is_simple_workload {
+                if let Some(ref tracker) = shared_tracker {
+                    // Write workload: share tracker across all workers for atomic cursor
+                    // For writes, the shared tracker handles distribution across workers
+                    // Each worker gets an equal share of the total request limit
+                    if let Some(total) = total_requests {
+                        let per_worker = total / total_workers as u64;
+                        // Last worker gets any remainder
+                        let worker_limit = if worker_id == total_workers - 1 {
+                            per_worker + (total % total_workers as u64)
+                        } else {
+                            per_worker
+                        };
+                        Box::new(SimpleContext::with_shared_tracker_and_limit(
+                            Arc::clone(tracker),
+                            self.config.keyspace_len,
+                            strategy.clone(),
+                            worker_limit,
+                        ))
+                    } else {
+                        create_workload_context_with_shared_tracker(
+                            Arc::clone(tracker),
+                            self.config.keyspace_len,
+                            strategy.clone(),
+                        )
+                    }
+                } else {
+                    // Read workload: each worker gets a partition for cache locality
+                    if let Some(total) = total_requests {
+                        let per_worker = total / total_workers as u64;
+                        let worker_limit = if worker_id == total_workers - 1 {
+                            per_worker + (total % total_workers as u64)
+                        } else {
+                            per_worker
+                        };
+                        Box::new(SimpleContext::with_partition_and_limit(
+                            self.config.keyspace_len,
+                            strategy.clone(),
+                            worker_id,
+                            total_workers,
+                            worker_limit,
+                        ))
+                    } else {
+                        Box::new(SimpleContext::with_partition(
+                            self.config.keyspace_len,
+                            strategy.clone(),
+                            worker_id,
+                            total_workers,
+                        ))
+                    }
+                }
+            } else {
+                // Vector and other workloads use the existing function
+                create_workload_context_with_iteration(
+                    workload,
+                    self.dataset.clone(),
+                    self.existence_map.clone(),
+                    self.protected_ids.clone(),
+                    worker_tag_dist,
+                    worker_numeric_fields,
+                    self.config.keyspace_len,
+                    self.config.sequential,
+                    self.config.seed.wrapping_add(worker_id as u64),
+                    k,
+                    key_prefix,
+                    self.config.iteration.as_deref(),
+                    total_requests, // Pass request limit to context
+                )
+            };
 
             let handle = thread::Builder::new()
                 .name(format!("event-worker-{}", worker_id))
@@ -1065,11 +1164,11 @@ impl Orchestrator {
 
         let templates = WeightedTemplates::weighted(weighted_templates);
 
-        // Create global counters
+        // Create global counters (duration-based or iterator-driven)
         let counters = Arc::new(if let Some(duration) = self.config.duration_secs {
             GlobalCounters::with_duration(duration)
         } else {
-            GlobalCounters::with_requests(self.effective_requests())
+            GlobalCounters::new() // Request count driven by iterator exhaustion
         });
 
         // Get addresses for workers
@@ -1100,6 +1199,8 @@ impl Orchestrator {
 
         let start_time = Instant::now();
         let topology = self.cluster_topology.clone();
+        let total_workers = self.config.threads as usize;
+        let is_write_workload = parallel.is_write();
 
         for worker_id in 0..self.config.threads as usize {
             let config = Arc::clone(&self.config);
@@ -1108,12 +1209,30 @@ impl Orchestrator {
             let addrs = addresses.clone();
             let topo = topology.clone();
 
-            // Use SimpleContext for parallel workloads (key-value workloads)
-            let workload_ctx = Box::new(SimpleContext::new(
-                self.config.keyspace_len,
-                self.config.sequential,
-                self.config.seed.wrapping_add(worker_id as u64),
-            ));
+            // Determine iteration strategy
+            let strategy = if self.config.sequential {
+                IterationStrategy::Sequential
+            } else {
+                IterationStrategy::Random { seed: self.config.seed.wrapping_add(worker_id as u64) }
+            };
+
+            // Use partitioned iteration for read workloads (each worker gets disjoint range)
+            // Use atomic cursor (continue_write) for write workloads (exactly-once claiming)
+            let workload_ctx: Box<dyn WorkloadContext + Send> = if is_write_workload {
+                // Write workloads: use atomic cursor for exactly-once claiming
+                Box::new(SimpleContext::with_strategy(
+                    self.config.keyspace_len,
+                    strategy,
+                ))
+            } else {
+                // Read workloads: use partitioned iteration for better locality
+                Box::new(SimpleContext::with_partition(
+                    self.config.keyspace_len,
+                    strategy,
+                    worker_id,
+                    total_workers,
+                ))
+            };
 
             let handle = thread::Builder::new()
                 .name(format!("event-worker-{}", worker_id))

@@ -1,0 +1,43 @@
+[2m2026-01-01T13:58:31.138522Z[0m [32m INFO[0m Detected engine type: ElastiCache Valkey
+[2m2026-01-01T13:58:31.138920Z[0m [32m INFO[0m Discovered cluster with 1 primaries, 3 total nodes
+[2m2026-01-01T13:58:31.138926Z[0m [32m INFO[0m   Primary: 172.31.23.206:6379 (slots: 16384)
+valkey-bench-rs v0.1.0
+============================================================
+Connection: zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379 | cluster(required, rfr=Primary)
+Base RTT: PING avg=0.22ms p99=0.22ms | GET-miss avg=0.22ms p99=0.22ms
+Workload: clients=800 threads=16 pipeline=1 requests=2,000,000 keyspace=1,000,000 datasize=100
+Tests: set
+============================================================
+
+
+Running test: SET
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        CLUSTER STATISTICS DELTA                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Time Interval:   3.63 sec | Nodes:   1                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+┌────────────────────────┬─────────────┬───────────────────┐
+│ METRIC                 │   CLUSTER   │       1-1-P       │
+├────────────────────────┼──────┬──────┼──────┬──────┬─────┤
+│                        │  Δ   │  /s  │  Δ   │  /s  │  %  │
+│ cmdstat_info:calls     │ 7.00 │ 1.93 │ 7.00 │ 1.93 │ 100 │
+│ cmdstat_info:usec      │ 2351 │  648 │ 2351 │  648 │ 100 │
+│ cmdstat_ping:calls     │ 5.00 │ 1.38 │ 5.00 │ 1.38 │ 100 │
+│ cmdstat_ping:usec      │ 2.00 │ 0.55 │ 2.00 │ 0.55 │ 100 │
+│ cmdstat_replconf:calls │ 6.00 │ 1.65 │ 6.00 │ 1.65 │ 100 │
+│ cmdstat_replconf:usec  │ 7.00 │ 1.93 │ 7.00 │ 1.93 │ 100 │
+│ cmdstat_set:calls      │   2M │ 551K │   2M │ 551K │ 100 │
+│ cmdstat_set:usec       │ 947K │ 261K │ 947K │ 261K │ 100 │
+│ used_memory            │  41M │  11M │  41M │  11M │ 100 │
+└────────────────────────┴──────┴──────┴──────┴──────┴─────┘
+
+
+=== SET ===
+Throughput: 551,327 req/s | Requests: 2,000,000 | Duration: 3.63s
+Latency (ms): avg=1.43 p50=1.35 p95=2.29 p99=4.20 p99.9=5.17 max=5.63
+
+============================================================
+BENCHMARK COMPLETE
+============================================================
+SET: 551,327 req/s | avg=1.43ms p50=1.35ms p99=4.20ms max=5.63ms

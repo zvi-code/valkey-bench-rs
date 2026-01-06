@@ -152,6 +152,12 @@ impl DatasetContext {
         &self.schema
     }
 
+    /// Get the dataset name from schema
+    #[inline]
+    pub fn name(&self) -> &str {
+        self.schema.name()
+    }
+
     /// Get the record layout
     #[inline]
     pub fn record_layout(&self) -> &RecordLayout {
@@ -447,6 +453,56 @@ impl DatasetContext {
         let mut ids: Vec<u64> = self.get_ground_truth_vector_ids().into_iter().collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// Build a ReferenceSet from ground truth vector IDs
+    ///
+    /// Returns a ReferenceSet containing all unique vector IDs that appear
+    /// in the ground truth neighbors across all queries. This is useful for:
+    /// - Protecting ground truth vectors during deletion benchmarks
+    /// - Checking coverage before query benchmarks
+    /// - Tracking which vectors are referenced by ground truth
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let dataset = DatasetContext::open("schema.yaml", "data.bin")?;
+    /// let protected = dataset.build_reference_set();
+    /// println!("Protected {} ground truth vectors", protected.len());
+    /// ```
+    pub fn build_reference_set(&self) -> keyspace_tracker::ReferenceSet {
+        let ids = self.get_ground_truth_vector_ids();
+        keyspace_tracker::ReferenceSet::from_iter(ids)
+    }
+
+    /// Build a ReferenceSet from ground truth, limiting to k neighbors per query
+    ///
+    /// This is useful when you only care about the top-k neighbors.
+    pub fn build_reference_set_k(&self, k: usize) -> keyspace_tracker::ReferenceSet {
+        let mut ids = std::collections::HashSet::new();
+
+        if self.section_layout.ground_truth_offset.is_none() {
+            return keyspace_tracker::ReferenceSet::from_iter(std::iter::empty());
+        }
+
+        let neighbors_per_query = self.section_layout.neighbors_per_query;
+        let k = k.min(neighbors_per_query);
+
+        for query_idx in 0..self.section_layout.query_count {
+            if self.section_layout.gt_id_size == 8 {
+                let neighbors = self.get_neighbor_ids(query_idx);
+                for &id in neighbors.iter().take(k) {
+                    ids.insert(id);
+                }
+            } else {
+                let neighbors = self.get_neighbor_ids_u32(query_idx);
+                for &id in neighbors.iter().take(k) {
+                    ids.insert(id as u64);
+                }
+            }
+        }
+
+        keyspace_tracker::ReferenceSet::from_iter(ids)
     }
 
     // === Statistics ===

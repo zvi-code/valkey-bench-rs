@@ -11,6 +11,7 @@ pub mod client;
 pub mod cluster;
 pub mod config;
 pub mod dataset;
+pub mod keyspace;
 pub mod metrics;
 pub mod optimizer;
 pub mod utils;

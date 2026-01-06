@@ -15,7 +15,6 @@ iteration strategies (--iteration), and addressable spaces (--address-type).\n\n
 For comprehensive examples, see EXAMPLES.md in the project directory.")]
 #[command(arg_required_else_help = false)]
 #[command(disable_help_flag = true)]
-#[command(trailing_var_arg = true)]
 #[allow(clippy::manual_non_exhaustive)]
 pub struct CliArgs {
     /// Print help information
@@ -28,7 +27,9 @@ pub struct CliArgs {
     pub cli_mode: bool,
 
     /// Command arguments when using --cli (non-interactive mode)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    /// These are captured when --cli flag is used, e.g., "valkey-bench-rs --cli -- GET foo"
+    /// Use -- to separate CLI commands from benchmark options
+    #[arg(last = true, allow_hyphen_values = true, hide = true)]
     pub command_args: Vec<String>,
 
     // ===== Connection Options =====

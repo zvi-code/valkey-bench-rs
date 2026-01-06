@@ -1,0 +1,24 @@
+{
+  "config": "hosts=[\"zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379\"], clients=50, threads=8, pipeline=1, requests=1000000",
+  "tests": [
+    {
+      "nodes": [],
+      "summary": {
+        "duration_secs": 0.0,
+        "latency": {
+          "max_ms": 0.0,
+          "mean_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "p999_ms": 0.0,
+          "p99_ms": 0.0
+        },
+        "node_count": 1,
+        "test_name": "VECLOAD",
+        "throughput": 0.0,
+        "total_errors": 0,
+        "total_ops": 0
+      }
+    }
+  ]
+}

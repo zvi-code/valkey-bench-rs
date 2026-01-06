@@ -843,20 +843,15 @@ impl EventWorker {
 
     /// Generate next key number (sequential or random)
     ///
-    /// Delegates to workload context for ID claiming.
-    fn next_key_num(&self, counters: &GlobalCounters) -> u64 {
-        self.workload_ctx.claim_next_id(counters).unwrap_or(0)
-    }
-
     /// Try to start a request with slot-aware routing
-    /// Returns true if a request was started, false if no idle client available
+    /// Returns true if a request was started, false if no idle client available or iterator exhausted
     fn try_start_slot_aware_request(
         &mut self,
-        counters: &GlobalCounters,
+        _counters: &GlobalCounters,
+        iterator_exhausted: &mut bool,
     ) -> bool {
         // First try to get any ready client
         // Try the slot-specific path first (most likely to succeed)
-        // Generate a "peek" key number - we'll commit to it only if we find a client
 
         // OPTIMIZATION: Check if any node queues have clients before generating key
         let has_ready_clients = self.node_ready_queues.values().any(|q| !q.is_empty());
@@ -864,8 +859,14 @@ impl EventWorker {
             return false;
         }
 
-        // Generate key number - only now that we know we have clients
-        let key_num = self.next_key_num(counters);
+        // Generate key number from iterator
+        let key_num = match self.workload_ctx.claim_next_id() {
+            Some(id) => id,
+            None => {
+                *iterator_exhausted = true;
+                return false;
+            }
+        };
 
         // Build key and calculate slot
         let key_bytes = self.build_key_bytes(key_num);
@@ -873,7 +874,7 @@ impl EventWorker {
 
         // Try to get client for this slot's node first
         if let Some(client_idx) = self.pop_ready_client_for_slot(slot) {
-            self.fill_placeholders_with_key(client_idx, key_num, counters);
+            self.fill_placeholders_with_key(client_idx, key_num);
             self.clients[client_idx].start_request();
             let _ = self.clients[client_idx].try_write();
             return true;
@@ -882,7 +883,7 @@ impl EventWorker {
         // No client for this specific slot's node, try any available client
         // This may cause a MOVED redirect, but it's better than losing work
         if let Some(client_idx) = self.pop_any_ready_client() {
-            self.fill_placeholders_with_key(client_idx, key_num, counters);
+            self.fill_placeholders_with_key(client_idx, key_num);
             self.clients[client_idx].start_request();
             let _ = self.clients[client_idx].try_write();
             return true;
@@ -898,7 +899,6 @@ impl EventWorker {
         &mut self,
         client_idx: usize,
         key_num: u64,
-        _counters: &GlobalCounters,
     ) {
         // Select template: random weighted selection for parallel mode, primary for single
         let template = if self.templates.is_parallel() {
@@ -1056,28 +1056,36 @@ impl EventWorker {
     ) -> EventWorkerResult {
         let batch_size = self.pipeline as u64;
         let slot_aware = self.needs_slot_routing();
+        let mut iterator_exhausted = false;
 
         // Start initial batch: drain ready queues
         if slot_aware {
             // For slot-aware: try to start as many requests as possible
-            while counters.claim_batch(batch_size).is_some() {
-                self.apply_rate_limit();
-                if !self.try_start_slot_aware_request(&counters) {
-                    // No ready client available, undo the claim
-                    // (counters don't support undo, so we'll just break)
+            loop {
+                if counters.is_duration_exceeded() {
                     break;
                 }
+                self.apply_rate_limit();
+                if !self.try_start_slot_aware_request(&counters, &mut iterator_exhausted) {
+                    break;
+                }
+                counters.record_issued(batch_size);
             }
         } else {
             // For non-slot-aware: pop from global ready queue
             while let Some(client_idx) = self.pop_any_ready_client() {
-                if counters.claim_batch(batch_size).is_none() {
-                    // No more work, return client to queue
+                if counters.is_duration_exceeded() {
                     self.return_client_to_ready(client_idx);
                     break;
                 }
                 self.apply_rate_limit();
-                self.fill_placeholders_for(client_idx, &counters);
+                if !self.fill_placeholders_for(client_idx) {
+                    // Iterator exhausted
+                    iterator_exhausted = true;
+                    self.return_client_to_ready(client_idx);
+                    break;
+                }
+                counters.record_issued(batch_size);
                 self.clients[client_idx].start_request();
             }
         }
@@ -1088,8 +1096,8 @@ impl EventWorker {
                 break;
             }
 
-            // Check if all requests have been issued and all clients are idle
-            if counters.is_complete() {
+            // Check if iterator exhausted and all clients are idle
+            if iterator_exhausted {
                 let all_idle = self
                     .clients
                     .iter()
@@ -1176,12 +1184,18 @@ impl EventWorker {
                                     self.return_client_to_ready(client_idx);
                                 } else {
                                     // Non-slot-aware: reuse client directly
-                                    if counters.claim_batch(batch_size).is_some() {
+                                    if !iterator_exhausted && !counters.is_duration_exceeded() {
                                         self.apply_rate_limit();
-                                        self.fill_placeholders_for(client_idx, &counters);
-                                        self.clients[client_idx].start_request();
-                                        // Immediately try to write (socket likely writable)
-                                        let _ = self.clients[client_idx].try_write();
+                                        if self.fill_placeholders_for(client_idx) {
+                                            counters.record_issued(batch_size);
+                                            self.clients[client_idx].start_request();
+                                            // Immediately try to write (socket likely writable)
+                                            let _ = self.clients[client_idx].try_write();
+                                        } else {
+                                            iterator_exhausted = true;
+                                            self.clients[client_idx].state = ClientState::Idle;
+                                            self.return_client_to_ready(client_idx);
+                                        }
                                     } else {
                                         self.clients[client_idx].state = ClientState::Idle;
                                         self.return_client_to_ready(client_idx);
@@ -1201,34 +1215,37 @@ impl EventWorker {
                 }
             }
 
-            // Start new requests from ready queue
-            if slot_aware {
-                // Slot-aware: try to start requests with proper routing
-                while counters.claim_batch(batch_size).is_some() {
-                    if counters.is_duration_exceeded() {
-                        break;
+            // Start new requests from ready queue (if iterator not exhausted)
+            if !iterator_exhausted {
+                if slot_aware {
+                    // Slot-aware: try to start requests with proper routing
+                    loop {
+                        if counters.is_duration_exceeded() {
+                            break;
+                        }
+                        self.apply_rate_limit();
+                        if !self.try_start_slot_aware_request(&counters, &mut iterator_exhausted) {
+                            break;
+                        }
+                        counters.record_issued(batch_size);
                     }
-                    self.apply_rate_limit();
-                    if !self.try_start_slot_aware_request(&counters) {
-                        // No ready client, break (work still claimed, will be retried)
-                        break;
+                } else {
+                    // Non-slot-aware: pop from global ready queue
+                    while let Some(client_idx) = self.pop_any_ready_client() {
+                        if counters.is_duration_exceeded() {
+                            self.return_client_to_ready(client_idx);
+                            break;
+                        }
+                        self.apply_rate_limit();
+                        if !self.fill_placeholders_for(client_idx) {
+                            iterator_exhausted = true;
+                            self.return_client_to_ready(client_idx);
+                            break;
+                        }
+                        counters.record_issued(batch_size);
+                        self.clients[client_idx].start_request();
+                        let _ = self.clients[client_idx].try_write();
                     }
-                }
-            } else {
-                // Non-slot-aware: pop from global ready queue
-                while let Some(client_idx) = self.pop_any_ready_client() {
-                    if counters.is_duration_exceeded() {
-                        self.return_client_to_ready(client_idx);
-                        break;
-                    }
-                    if counters.claim_batch(batch_size).is_none() {
-                        self.return_client_to_ready(client_idx);
-                        break;
-                    }
-                    self.apply_rate_limit();
-                    self.fill_placeholders_for(client_idx, &counters);
-                    self.clients[client_idx].start_request();
-                    let _ = self.clients[client_idx].try_write();
                 }
             }
         }
@@ -1251,19 +1268,20 @@ impl EventWorker {
     }
 
     /// Fill placeholders for a specific client by index
+    /// Fill placeholders for a client. Returns true if an ID was claimed, false if exhausted.
     fn fill_placeholders_for(
         &mut self,
         client_idx: usize,
-        counters: &GlobalCounters,
-    ) {
+    ) -> bool {
         // Get key number from workload context (claim once, use consistently)
-        let key_num = match self.workload_ctx.claim_next_id(counters) {
+        let key_num = match self.workload_ctx.claim_next_id() {
             Some(id) => id,
-            None => return, // No more IDs available
+            None => return false, // No more IDs available (iterator exhausted)
         };
 
         // Delegate to the unified implementation
-        self.fill_placeholders_with_key(client_idx, key_num, counters);
+        self.fill_placeholders_with_key(client_idx, key_num);
+        true
     }
 }
 

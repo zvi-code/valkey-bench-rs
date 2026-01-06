@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-01T14:13:40+00:00",
+    "host": "zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com",
+    "port": 6379,
+    "dataset": "cohere-medium-1m",
+    "mode": "quick"
+  },
+  "results": {}
+}

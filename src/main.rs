@@ -20,6 +20,7 @@ mod client;
 mod cluster;
 mod config;
 mod dataset;
+mod keyspace;
 mod metrics;
 mod optimizer;
 mod utils;
@@ -289,8 +290,8 @@ fn run_optimization(
     setup_vector_index(&orchestrator, base_config, has_vec_workload)?;
 
     if has_vec_workload && base_config.search_config.is_some() {
-        info!("Building cluster tag map...");
-        orchestrator.build_cluster_tag_map()?;
+        info!("Building existence map...");
+        orchestrator.build_existence_map()?;
     }
 
     // Build protected IDs for vec-delete (skip ground truth vectors)
@@ -307,7 +308,7 @@ fn run_optimization(
     // This avoids rediscovering cluster topology on each iteration (prevents port exhaustion)
     let shared_topology = orchestrator.cluster_topology().cloned();
     let shared_backend = orchestrator.backend().clone();
-    let shared_tag_map = orchestrator.cluster_tag_map();
+    let shared_existence_map = orchestrator.existence_map();
     let shared_protected_ids = orchestrator.protected_ids();
 
     // Optimization loop
@@ -344,8 +345,8 @@ fn run_optimization(
         if let Some(ref ds) = dataset {
             iter_orchestrator.set_dataset_arc(ds.clone());
         }
-        if let Some(ref tag_map) = shared_tag_map {
-            iter_orchestrator.set_cluster_tag_map(tag_map.clone());
+        if let Some(ref existence_map) = shared_existence_map {
+            iter_orchestrator.set_existence_map(existence_map.clone());
         }
         if let Some(ref protected) = shared_protected_ids {
             iter_orchestrator.set_protected_ids(protected.clone());
@@ -654,8 +655,8 @@ fn run() -> Result<()> {
     // If no keys exist, scan completes very fast
     if has_vec_workload
         && config.search_config.is_some() {
-            info!("Building cluster tag map for existing vectors...");
-            orchestrator.build_cluster_tag_map()?;
+            info!("Building existence map for existing vectors...");
+            orchestrator.build_existence_map()?;
         }
 
     // Build protected IDs for vec-delete (skip ground truth vectors)

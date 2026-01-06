@@ -54,6 +54,9 @@ tabled = "0.20"
 # Readline for CLI mode (history, line editing)
 rustyline = "14"
 
+# Keyspace tracking (bitmap-based existence tracking, iteration patterns)
+keyspace_tracker = { path = "keyspace_tracker" }
+
 # TLS support
 native-tls = { version = "0.2", optional = true }
 rustls = { version = "0.23", optional = true }

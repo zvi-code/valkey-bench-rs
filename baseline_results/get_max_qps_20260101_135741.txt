@@ -1,0 +1,45 @@
+[2m2026-01-01T13:58:42.328413Z[0m [32m INFO[0m Detected engine type: ElastiCache Valkey
+[2m2026-01-01T13:58:42.328806Z[0m [32m INFO[0m Discovered cluster with 1 primaries, 3 total nodes
+[2m2026-01-01T13:58:42.328812Z[0m [32m INFO[0m   Primary: 172.31.23.206:6379 (slots: 16384)
+valkey-bench-rs v0.1.0
+============================================================
+Connection: zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379 | cluster(required, rfr=Primary)
+Base RTT: PING avg=0.22ms p99=0.32ms | GET-miss avg=0.22ms p99=0.22ms
+Workload: clients=800 threads=16 pipeline=1 requests=5,000,000 keyspace=1,000,000 datasize=3
+Tests: get
+============================================================
+
+
+Running test: GET
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        CLUSTER STATISTICS DELTA                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Time Interval:   5.05 sec | Nodes:   1                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+┌────────────────────────┬─────────────┬───────────────────┐
+│ METRIC                 │   CLUSTER   │       1-1-P       │
+├────────────────────────┼──────┬──────┼──────┬──────┬─────┤
+│                        │  Δ   │  /s  │  Δ   │  /s  │  %  │
+│ cmdstat_get:calls      │   5M │ 990K │   5M │ 990K │ 100 │
+│ cmdstat_get:usec       │ 791K │ 157K │ 791K │ 157K │ 100 │
+│ cmdstat_info:calls     │ 14.0 │ 2.77 │ 14.0 │ 2.77 │ 100 │
+│ cmdstat_info:usec      │ 4967 │  983 │ 4967 │  983 │ 100 │
+│ cmdstat_ping:calls     │ 13.0 │ 2.57 │ 13.0 │ 2.57 │ 100 │
+│ cmdstat_ping:usec      │ 9.00 │ 1.78 │ 9.00 │ 1.78 │ 100 │
+│ cmdstat_replconf:calls │ 8.00 │ 1.58 │ 8.00 │ 1.58 │ 100 │
+│ cmdstat_replconf:usec  │ 9.00 │ 1.78 │ 9.00 │ 1.78 │ 100 │
+│ keyspace_hits          │   5M │ 990K │   5M │ 990K │ 100 │
+│ used_memory            │ 849K │ 168K │ 849K │ 168K │ 100 │
+└────────────────────────┴──────┴──────┴──────┴──────┴─────┘
+
+
+=== GET ===
+Throughput: 990,223 req/s | Requests: 5,000,000 | Duration: 5.05s
+Latency (ms): avg=0.80 p50=0.79 p95=1.19 p99=1.39 p99.9=3.93 max=4.44
+Keyspace: hits=5,000,000 misses=0 hit-rate=100.0%
+
+============================================================
+BENCHMARK COMPLETE
+============================================================
+GET: 990,223 req/s | avg=0.80ms p50=0.79ms p99=1.39ms max=4.44ms | hit-rate=100.0%

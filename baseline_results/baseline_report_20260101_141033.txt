@@ -1,0 +1,40 @@
+═══════════════════════════════════════════════════════════════════════════════
+  SIMPLE BASELINE BENCHMARK REPORT
+  Generated: Thu Jan  1 14:10:33 UTC 2026
+═══════════════════════════════════════════════════════════════════════════════
+
+Configuration:
+  Host:       zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379
+  Mode:       quick
+  Cluster:    --cluster
+  Keyspace:   200000 keys
+  Value size: 500 bytes
+  Max QPS:    400 clients, 10 threads
+
+Initial state: DBSIZE=0, Memory=2.76G
+Memory after prefill: 2.87G
+
+═══════════════════════════════════════════════════════════════════════════════
+  RESULTS SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+
+Database State:
+  Initial:  DBSIZE=0, Memory=2.76G
+  After prefill: DBSIZE=200000, Memory=2.87G
+  Final:    DBSIZE=200000, Memory=2.87G
+
+Max QPS (400 clients, 10 threads):
+  Sequential Prefill: 412178 req/s
+  Random Override:    498782 req/s
+  Random Read:        920796 req/s
+
+Single Client Latency:
+  GET P99: 0.12ms
+  SET P99: 0.13ms
+
+Verification:
+  DBSIZE correct: ✓
+  Hit rate 100%:  ✓
+
+Result files: /data/valkey-bench-rs/baseline_results/*_20260101_141033.txt
+

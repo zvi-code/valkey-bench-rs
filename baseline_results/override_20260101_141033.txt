@@ -1,0 +1,41 @@
+[2m2026-01-01T14:10:37.655975Z[0m [32m INFO[0m Detected engine type: ElastiCache Valkey
+[2m2026-01-01T14:10:37.656373Z[0m [32m INFO[0m Discovered cluster with 1 primaries, 3 total nodes
+[2m2026-01-01T14:10:37.656380Z[0m [32m INFO[0m   Primary: 172.31.23.206:6379 (slots: 16384)
+valkey-bench-rs v0.1.0
+============================================================
+Connection: zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379 | cluster(required, rfr=Primary)
+Base RTT: PING avg=0.22ms p99=0.32ms | GET-miss avg=0.22ms p99=0.32ms
+Workload: clients=400 threads=10 pipeline=1 requests=400,000 keyspace=200,000 datasize=500
+Tests: set
+============================================================
+
+
+Running test: SET
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        CLUSTER STATISTICS DELTA                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Time Interval:   0.80 sec | Nodes:   1                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+┌────────────────────────┬─────────────┬───────────────────┐
+│ METRIC                 │   CLUSTER   │       1-1-P       │
+├────────────────────────┼──────┬──────┼──────┬──────┬─────┤
+│                        │  Δ   │  /s  │  Δ   │  /s  │  %  │
+│ cmdstat_info:calls     │ 2.00 │ 2.49 │ 2.00 │ 2.49 │ 100 │
+│ cmdstat_info:usec      │  183 │  228 │  183 │  228 │ 100 │
+│ cmdstat_replconf:calls │ 1.00 │ 1.24 │ 1.00 │ 1.24 │ 100 │
+│ cmdstat_replconf:usec  │ 1.00 │ 1.24 │ 1.00 │ 1.24 │ 100 │
+│ cmdstat_set:calls      │ 400K │ 497K │ 400K │ 497K │ 100 │
+│ cmdstat_set:usec       │ 195K │ 242K │ 195K │ 242K │ 100 │
+│ used_memory            │  29M │  36M │  29M │  36M │ 100 │
+└────────────────────────┴──────┴──────┴──────┴──────┴─────┘
+
+
+=== SET ===
+Throughput: 498,782 req/s | Requests: 400,000 | Duration: 0.80s
+Latency (ms): avg=0.77 p50=0.77 p95=1.14 p99=1.29 p99.9=3.96 max=4.30
+
+============================================================
+BENCHMARK COMPLETE
+============================================================
+SET: 498,782 req/s | avg=0.77ms p50=0.77ms p99=1.29ms max=4.30ms

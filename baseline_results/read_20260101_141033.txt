@@ -1,0 +1,42 @@
+[2m2026-01-01T14:10:38.925213Z[0m [32m INFO[0m Detected engine type: ElastiCache Valkey
+[2m2026-01-01T14:10:38.925622Z[0m [32m INFO[0m Discovered cluster with 1 primaries, 3 total nodes
+[2m2026-01-01T14:10:38.925629Z[0m [32m INFO[0m   Primary: 172.31.23.206:6379 (slots: 16384)
+valkey-bench-rs v0.1.0
+============================================================
+Connection: zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379 | cluster(required, rfr=Primary)
+Base RTT: PING avg=0.21ms p99=0.32ms | GET-miss avg=0.22ms p99=0.32ms
+Workload: clients=400 threads=10 pipeline=1 requests=600,000 keyspace=200,000 datasize=3
+Tests: get
+============================================================
+
+
+Running test: GET
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        CLUSTER STATISTICS DELTA                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Time Interval:   0.65 sec | Nodes:   1                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+┌────────────────────┬─────────────┬───────────────────┐
+│ METRIC             │   CLUSTER   │       1-1-P       │
+├────────────────────┼──────┬──────┼──────┬──────┬─────┤
+│                    │  Δ   │  /s  │  Δ   │  /s  │  %  │
+│ cmdstat_get:calls  │ 600K │ 918K │ 600K │ 918K │ 100 │
+│ cmdstat_get:usec   │  97K │ 148K │  97K │ 148K │ 100 │
+│ cmdstat_info:calls │ 4.00 │ 6.12 │ 4.00 │ 6.12 │ 100 │
+│ cmdstat_info:usec  │ 1065 │ 1629 │ 1065 │ 1629 │ 100 │
+│ cmdstat_ping:calls │ 2.00 │ 3.06 │ 2.00 │ 3.06 │ 100 │
+│ keyspace_hits      │ 600K │ 918K │ 600K │ 918K │ 100 │
+│ used_memory        │ 433K │ 662K │ 433K │ 662K │ 100 │
+└────────────────────┴──────┴──────┴──────┴──────┴─────┘
+
+
+=== GET ===
+Throughput: 920,796 req/s | Requests: 600,000 | Duration: 0.65s
+Latency (ms): avg=0.41 p50=0.41 p95=0.54 p99=0.65 p99.9=3.45 max=3.76
+Keyspace: hits=600,000 misses=0 hit-rate=100.0%
+
+============================================================
+BENCHMARK COMPLETE
+============================================================
+GET: 920,796 req/s | avg=0.41ms p50=0.41ms p99=0.65ms max=3.76ms | hit-rate=100.0%

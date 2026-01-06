@@ -1,0 +1,41 @@
+[2m2026-01-01T13:57:41.585693Z[0m [32m INFO[0m Detected engine type: ElastiCache Valkey
+[2m2026-01-01T13:57:41.586084Z[0m [32m INFO[0m Discovered cluster with 1 primaries, 3 total nodes
+[2m2026-01-01T13:57:41.586090Z[0m [32m INFO[0m   Primary: 172.31.23.206:6379 (slots: 16384)
+valkey-bench-rs v0.1.0
+============================================================
+Connection: zvi-vss-16xl.ajfdds.clustercfg.euw1devo.cache.amazonaws.com:6379 | cluster(required, rfr=Primary)
+Base RTT: PING avg=0.22ms p99=0.32ms | GET-miss avg=0.18ms p99=0.22ms
+Workload: clients=1 threads=1 pipeline=1 requests=50,000 keyspace=50,000 datasize=3
+Tests: ping
+============================================================
+
+
+Running test: PING
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        CLUSTER STATISTICS DELTA                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ Time Interval:   5.01 sec | Nodes:   1                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+┌────────────────────────┬─────────────┬───────────────────┐
+│ METRIC                 │   CLUSTER   │       1-1-P       │
+├────────────────────────┼──────┬──────┼──────┬──────┬─────┤
+│                        │  Δ   │  /s  │  Δ   │  /s  │  %  │
+│ cmdstat_info:calls     │ 14.0 │ 2.80 │ 14.0 │ 2.80 │ 100 │
+│ cmdstat_info:usec      │ 4261 │  851 │ 4261 │  851 │ 100 │
+│ cmdstat_ping:calls     │  50K │ 9989 │  50K │ 9989 │ 100 │
+│ cmdstat_ping:usec      │ 5417 │ 1082 │ 5417 │ 1082 │ 100 │
+│ cmdstat_replconf:calls │ 10.0 │ 2.00 │ 10.0 │ 2.00 │ 100 │
+│ cmdstat_replconf:usec  │ 6.00 │ 1.20 │ 6.00 │ 1.20 │ 100 │
+│ used_memory            │ 1016 │  203 │ 1016 │  203 │ 100 │
+└────────────────────────┴──────┴──────┴──────┴──────┴─────┘
+
+
+=== PING ===
+Throughput: 9,990 req/s | Requests: 50,000 | Duration: 5.00s
+Latency (ms): avg=0.10 p50=0.10 p95=0.10 p99=0.11 p99.9=0.82 max=2.83
+
+============================================================
+BENCHMARK COMPLETE
+============================================================
+PING: 9,990 req/s | avg=0.10ms p50=0.10ms p99=0.11ms max=2.83ms
