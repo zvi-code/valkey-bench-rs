@@ -30,8 +30,8 @@ use crate::utils::Result;
 use crate::workload::{
     create_index, create_template, create_workload_context_with_iteration,
     create_workload_context_with_shared_tracker, drop_index, get_index_info,
-    index_exists, IterationStrategy, NumericFieldSet, ParallelWorkload, SimpleContext, Workload,
-    WorkloadContext, WorkloadType,
+    index_exists, CompositeWorkload, IterationStrategy, NumericFieldSet, ParallelWorkload,
+    SimpleContext, Workload, WorkloadContext, WorkloadType,
 };
 
 /// Keyspace hit/miss statistics from INFO stats
@@ -1128,6 +1128,49 @@ impl Orchestrator {
                 result.print_summary();
             }
             results.push(result);
+            return Ok(results);
+        }
+
+        // Check if composite workload is specified
+        if let Some(ref composite_spec) = self.config.composite {
+            let mut composite_workload = CompositeWorkload::parse(composite_spec)?;
+            // Apply global defaults from config to each phase
+            composite_workload.apply_defaults(
+                &self.config.key_prefix,
+                self.config.keyspace_len,
+                self.config.data_size,
+                self.config.search_config.as_ref(),
+                self.config.schema_path.as_ref(),
+                self.config.data_path.as_ref(),
+            );
+
+            if !self.config.quiet {
+                println!("\n=== COMPOSITE WORKLOAD: {} ===", composite_workload.name());
+                println!("Phases: {}", composite_workload.len());
+            }
+
+            // Run each phase sequentially
+            let default_requests = self.config.effective_requests(None);
+            for (i, phase) in composite_workload.phases().iter().enumerate() {
+                let phase_requests = phase.requests.unwrap_or(default_requests);
+                if !self.config.quiet {
+                    println!(
+                        "\n[Phase {}/{}] {} ({} requests)",
+                        i + 1,
+                        composite_workload.len(),
+                        phase.config.workload_type,
+                        phase_requests
+                    );
+                }
+
+                // Run the phase
+                let result = self.run_test_event(phase.config.workload_type)?;
+                if !self.config.quiet {
+                    result.print_summary();
+                }
+                results.push(result);
+            }
+
             return Ok(results);
         }
 
