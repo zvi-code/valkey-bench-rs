@@ -1249,6 +1249,232 @@ impl WorkloadContext for VectorDeleteContext {
 }
 
 // =============================================================================
+// ProtectedDeleteContext - Simple bitmap-based GT protection for VecDelProtected
+// =============================================================================
+
+/// Context for vector deletion with simple bitmap-based GT protection
+///
+/// This is the **elegant solution** for protected deletion:
+/// - GT vector IDs are marked as SET in a bitmap (PrefixTracker)
+/// - Iteration uses `unset_only()` to skip GT IDs automatically
+/// - Supports all iteration strategies: sequential, random, zipfian
+/// - No complex multi-component coordination needed
+///
+/// # How it works
+///
+/// 1. Create a PrefixTracker with max_id = num_vectors
+/// 2. Mark all GT vector IDs as SET in the tracker
+/// 3. Use `unset_only().continue_write()` to iterate only on non-GT IDs
+///
+/// The `unset_only()` filter ensures that:
+/// - GT vectors are never returned (they are SET in the bitmap)
+/// - Only deleteable vectors (UNSET) are returned
+/// - Works with any iteration strategy (sequential, random, zipfian)
+///
+/// # Example
+///
+/// ```ignore
+/// // GT IDs: [5, 10, 15, 20]
+/// let gt_bitmap = Arc::new(PrefixTracker::new(config));
+/// for id in gt_ids {
+///     gt_bitmap.add(id);  // Mark GT as SET
+/// }
+///
+/// // Create context - will only iterate on non-GT IDs
+/// let ctx = ProtectedDeleteContext::new(dataset, gt_bitmap, strategy);
+///
+/// // Iteration skips 5, 10, 15, 20 automatically
+/// ctx.claim_next_id()  // Returns Some(0), Some(1), ..., skips 5, ...
+/// ```
+pub struct ProtectedDeleteContext {
+    dataset: Arc<DatasetContext>,
+    /// Bitmap where SET = GT (protected), UNSET = deleteable
+    gt_bitmap: Arc<PrefixTracker>,
+    /// Iteration strategy
+    strategy: IterationStrategy,
+    /// Optional request limit
+    request_limit: Option<u64>,
+    /// Counter for requests claimed
+    requests_claimed: AtomicU64,
+}
+
+impl ProtectedDeleteContext {
+    /// Create with GT bitmap (GT IDs should already be SET in the tracker)
+    ///
+    /// The gt_bitmap should have GT vector IDs marked as SET.
+    /// Iteration will only return UNSET IDs (non-GT, deleteable).
+    pub fn new(
+        dataset: Arc<DatasetContext>,
+        gt_bitmap: Arc<PrefixTracker>,
+        strategy: IterationStrategy,
+    ) -> Self {
+        Self {
+            dataset,
+            gt_bitmap,
+            strategy,
+            request_limit: None,
+            requests_claimed: AtomicU64::new(0),
+        }
+    }
+
+    /// Create with GT bitmap and optional request limit
+    pub fn with_limit(
+        dataset: Arc<DatasetContext>,
+        gt_bitmap: Arc<PrefixTracker>,
+        strategy: IterationStrategy,
+        request_limit: Option<u64>,
+    ) -> Self {
+        Self {
+            dataset,
+            gt_bitmap,
+            strategy,
+            request_limit,
+            requests_claimed: AtomicU64::new(0),
+        }
+    }
+
+    /// Create from an iterator of GT IDs
+    ///
+    /// Convenience constructor that creates the GT bitmap internally.
+    pub fn from_gt_ids(
+        dataset: Arc<DatasetContext>,
+        gt_ids: impl IntoIterator<Item = u64>,
+        strategy: IterationStrategy,
+    ) -> Self {
+        Self::from_gt_ids_with_limit(dataset, gt_ids, strategy, None)
+    }
+
+    /// Create from an iterator of GT IDs with optional request limit
+    pub fn from_gt_ids_with_limit(
+        dataset: Arc<DatasetContext>,
+        gt_ids: impl IntoIterator<Item = u64>,
+        strategy: IterationStrategy,
+        request_limit: Option<u64>,
+    ) -> Self {
+        let num_vectors = dataset.num_vectors();
+        let prefix = format!("gt:{}:", dataset.name());
+        let config = TrackerConfig::simple(&prefix)
+            .with_max_id(num_vectors)
+            .with_initial_capacity(num_vectors as usize);
+        let gt_bitmap = Arc::new(PrefixTracker::new(config));
+
+        // Mark all GT IDs as SET (protected)
+        for id in gt_ids {
+            if id < num_vectors {
+                gt_bitmap.add(id);
+            }
+        }
+
+        Self::with_limit(dataset, gt_bitmap, strategy, request_limit)
+    }
+
+    /// Get the GT bitmap for external inspection
+    pub fn gt_bitmap(&self) -> &Arc<PrefixTracker> {
+        &self.gt_bitmap
+    }
+
+    /// Get count of protected (GT) IDs
+    pub fn protected_count(&self) -> u64 {
+        self.gt_bitmap.count()
+    }
+
+    /// Get count of deleteable (non-GT) IDs
+    pub fn deleteable_count(&self) -> u64 {
+        self.dataset.num_vectors().saturating_sub(self.gt_bitmap.count())
+    }
+
+    /// Check if an ID is protected (GT)
+    #[inline]
+    pub fn is_protected(&self, id: u64) -> bool {
+        self.gt_bitmap.exists(id)
+    }
+}
+
+impl WorkloadContext for ProtectedDeleteContext {
+    fn claim_next_id(&self) -> Option<u64> {
+        // Check request limit first
+        if let Some(limit) = self.request_limit {
+            let claimed = self.requests_claimed.fetch_add(1, Ordering::Relaxed);
+            if claimed >= limit {
+                return None;
+            }
+        }
+
+        // The magic: unset_only() skips all GT IDs automatically!
+        let iter = self.gt_bitmap.iter().unset_only();
+
+        match &self.strategy {
+            IterationStrategy::Sequential => {
+                iter.continue_write().next().map(|(id, _)| id)
+            }
+            IterationStrategy::Random { seed } => {
+                iter.seed(*seed).continue_write().next().map(|(id, _)| id)
+            }
+            IterationStrategy::Zipfian { skew, seed } => {
+                iter.distribution(AccessDistribution::Zipfian { skew: *skew })
+                    .seed(*seed)
+                    .continue_write()
+                    .next()
+                    .map(|(id, _)| id)
+            }
+            IterationStrategy::Subset { start, end, inner } => {
+                let base = iter.id_range(*start, *end);
+                match inner.as_ref() {
+                    IterationStrategy::Sequential => base.continue_write().next().map(|(id, _)| id),
+                    IterationStrategy::Random { seed } => {
+                        base.seed(*seed).continue_write().next().map(|(id, _)| id)
+                    }
+                    IterationStrategy::Zipfian { skew, seed } => {
+                        base.distribution(AccessDistribution::Zipfian { skew: *skew })
+                            .seed(*seed)
+                            .continue_write()
+                            .next()
+                            .map(|(id, _)| id)
+                    }
+                    _ => base.continue_write().next().map(|(id, _)| id),
+                }
+            }
+        }
+    }
+
+    fn next_dataset_idx(&self) -> Option<u64> {
+        self.claim_next_id()
+    }
+
+    fn get_query_bytes(&self, _idx: u64) -> Option<&[u8]> {
+        None
+    }
+
+    fn get_vector_bytes(&self, _idx: u64) -> Option<&[u8]> {
+        None // Delete doesn't need vector bytes
+    }
+
+    fn compute_and_record_recall(&mut self, _query_idx: u64, _response: &RespValue) {
+        // No-op for delete workloads
+    }
+
+    fn take_metrics(&mut self) -> WorkloadMetrics {
+        WorkloadMetrics::None
+    }
+
+    fn num_items(&self) -> u64 {
+        self.dataset.num_vectors()
+    }
+
+    fn num_queries(&self) -> u64 {
+        0
+    }
+
+    fn uses_dataset_keys(&self) -> bool {
+        true // Key is the vector ID to delete
+    }
+
+    fn key_is_claimed_id(&self) -> bool {
+        true // Key is directly the claimed ID (vector ID to delete)
+    }
+}
+
+// =============================================================================
 // VectorUpdateContext - For VecUpdate (similar to VecLoad but updates existing)
 // =============================================================================
 
@@ -1701,6 +1927,22 @@ pub fn create_workload_context_with_iteration(
                 strategy,
             ))
         }
+        WorkloadType::VecDelProtected => {
+            let ds = dataset.expect("VecDelProtected requires dataset");
+            // Create GT bitmap from protected_ids if available
+            if let Some(ref pids) = protected_ids {
+                // Use the ReferenceSet from ProtectedIds to build GT bitmap
+                let gt_ids = pids.reference_set().iter();
+                Box::new(ProtectedDeleteContext::from_gt_ids_with_limit(
+                    ds, gt_ids, strategy, request_limit
+                ))
+            } else {
+                // No GT protection - create empty bitmap (all IDs deleteable)
+                Box::new(ProtectedDeleteContext::from_gt_ids_with_limit(
+                    ds, std::iter::empty(), strategy, request_limit
+                ))
+            }
+        }
         WorkloadType::VecUpdate => {
             let ds = dataset.expect("VecUpdate requires dataset");
             Box::new(VectorUpdateContext::with_strategy(
@@ -1962,5 +2204,258 @@ mod tests {
 
         // After 20 claims, should return None
         assert!(ctx.claim_next_id().is_none());
+    }
+
+    // =========================================================================
+    // ProtectedDeleteContext Tests - Verify GT skipping logic
+    // =========================================================================
+
+    /// Test GT skipping with bitmap directly (no dataset needed)
+    #[test]
+    fn test_gt_bitmap_skipping_sequential() {
+        use keyspace_tracker::{PrefixTracker, TrackerConfig};
+
+        let max_id = 20u64;
+        let config = TrackerConfig::simple("test:")
+            .with_max_id(max_id)
+            .with_initial_capacity(max_id as usize);
+        let gt_bitmap = PrefixTracker::new(config);
+
+        // Mark GT IDs: 5, 10, 15 (protected)
+        gt_bitmap.add(5);
+        gt_bitmap.add(10);
+        gt_bitmap.add(15);
+
+        assert_eq!(gt_bitmap.count(), 3, "Should have 3 GT IDs");
+
+        // Use unset_only() to iterate only on non-GT IDs
+        // WriteIter doesn't implement Iterator trait, so use next() method directly
+        let mut deleted_ids: Vec<u64> = Vec::new();
+        let mut iter = gt_bitmap.iter().unset_only().continue_write();
+        while let Some((id, _)) = iter.next() {
+            if id >= max_id {
+                break;
+            }
+            deleted_ids.push(id);
+        }
+
+        // Should have deleted 17 IDs (20 - 3 GT)
+        assert_eq!(deleted_ids.len(), 17, "Should have 17 deleteable IDs, got {}", deleted_ids.len());
+
+        // Verify GT IDs are NOT in the deleted list
+        assert!(!deleted_ids.contains(&5), "GT ID 5 should not be deleted");
+        assert!(!deleted_ids.contains(&10), "GT ID 10 should not be deleted");
+        assert!(!deleted_ids.contains(&15), "GT ID 15 should not be deleted");
+
+        // Verify all other IDs are present
+        for id in 0..max_id {
+            if id != 5 && id != 10 && id != 15 {
+                assert!(deleted_ids.contains(&id), "ID {} should be in deleted list", id);
+            }
+        }
+    }
+
+    /// Test GT skipping with random iteration
+    #[test]
+    fn test_gt_bitmap_skipping_random() {
+        use keyspace_tracker::{PrefixTracker, TrackerConfig};
+        use std::collections::HashSet;
+
+        let max_id = 100u64;
+        let config = TrackerConfig::simple("test:")
+            .with_max_id(max_id)
+            .with_initial_capacity(max_id as usize);
+        let gt_bitmap = PrefixTracker::new(config);
+
+        // Mark GT IDs: even numbers 0-20 (11 protected IDs)
+        let gt_ids: Vec<u64> = (0..=20).step_by(2).collect();
+        for &id in &gt_ids {
+            gt_bitmap.add(id);
+        }
+        assert_eq!(gt_bitmap.count(), 11, "Should have 11 GT IDs");
+
+        // Use unset_only() with random seed
+        let mut deleted_ids: HashSet<u64> = HashSet::new();
+        let mut iter = gt_bitmap.iter().unset_only().seed(42).continue_write();
+        while let Some((id, _)) = iter.next() {
+            if id >= max_id {
+                break;
+            }
+            deleted_ids.insert(id);
+        }
+
+        // Should have deleted 89 IDs (100 - 11 GT)
+        assert_eq!(deleted_ids.len(), 89, "Should have 89 deleteable IDs, got {}", deleted_ids.len());
+
+        // Verify NO GT IDs are in the deleted set
+        for &gt_id in &gt_ids {
+            assert!(!deleted_ids.contains(&gt_id), "GT ID {} should not be deleted", gt_id);
+        }
+    }
+
+    /// Test exhaustion - iteration should stop when all deleteable IDs are claimed
+    #[test]
+    fn test_gt_bitmap_exhaustion() {
+        use keyspace_tracker::{PrefixTracker, TrackerConfig};
+
+        let max_id = 10u64;
+        let config = TrackerConfig::simple("test:")
+            .with_max_id(max_id)
+            .with_initial_capacity(max_id as usize);
+        let gt_bitmap = PrefixTracker::new(config);
+
+        // Mark half as GT: 0, 1, 2, 3, 4 (5 protected)
+        for id in 0..5 {
+            gt_bitmap.add(id);
+        }
+
+        // Create iterator
+        let mut iter = gt_bitmap.iter().unset_only().continue_write();
+
+        // Should get exactly 5 IDs: 5, 6, 7, 8, 9
+        for expected_id in 5..10 {
+            let result = iter.next();
+            assert!(result.is_some(), "Expected ID {}", expected_id);
+            let (id, _) = result.unwrap();
+            assert_eq!(id, expected_id, "Expected ID {}, got {}", expected_id, id);
+        }
+
+        // Next call should return None (exhausted)
+        assert!(iter.next().is_none(), "Should be exhausted");
+    }
+
+    /// Test that continue_write preserves cursor across multiple claim calls
+    #[test]
+    fn test_gt_bitmap_continue_write_cursor() {
+        use keyspace_tracker::{PrefixTracker, TrackerConfig};
+        use std::collections::HashSet;
+
+        let max_id = 100u64;
+        let config = TrackerConfig::simple("test:")
+            .with_max_id(max_id)
+            .with_initial_capacity(max_id as usize);
+        let gt_bitmap = Arc::new(PrefixTracker::new(config));
+
+        // Mark IDs 0, 10, 20, 30, ... as GT
+        for id in (0..100).step_by(10) {
+            gt_bitmap.add(id);
+        }
+
+        // Simulate multiple claim_next_id calls (like ProtectedDeleteContext does)
+        let mut claimed: Vec<u64> = Vec::new();
+
+        // Each call to iter().unset_only().continue_write().next() should advance the cursor
+        for _ in 0..50 {
+            let iter = gt_bitmap.iter().unset_only();
+            if let Some((id, _)) = iter.continue_write().next() {
+                claimed.push(id);
+            }
+        }
+
+        // Should have claimed 50 unique IDs (none should be GT)
+        assert_eq!(claimed.len(), 50, "Should have claimed 50 IDs");
+
+        // Check uniqueness
+        let unique: HashSet<u64> = claimed.iter().copied().collect();
+        assert_eq!(unique.len(), 50, "All claimed IDs should be unique");
+
+        // No claimed ID should be a GT ID (multiple of 10)
+        for &id in &claimed {
+            assert!(id % 10 != 0, "Claimed ID {} should not be a GT ID (multiple of 10)", id);
+        }
+    }
+
+    /// Test concurrent claiming doesn't produce duplicates
+    #[test]
+    fn test_gt_bitmap_concurrent_claiming() {
+        use keyspace_tracker::{PrefixTracker, TrackerConfig};
+        use std::sync::Arc;
+        use std::thread;
+        use std::collections::HashSet;
+
+        let max_id = 1000u64;
+        let config = TrackerConfig::simple("test:")
+            .with_max_id(max_id)
+            .with_initial_capacity(max_id as usize);
+        let gt_bitmap = Arc::new(PrefixTracker::new(config));
+
+        // Mark 100 GT IDs (0-99)
+        for id in 0..100 {
+            gt_bitmap.add(id);
+        }
+
+        let claimed = Arc::new(std::sync::Mutex::new(HashSet::new()));
+
+        // Spawn 4 threads, each claiming 200 IDs
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let bitmap = Arc::clone(&gt_bitmap);
+                let claimed = Arc::clone(&claimed);
+
+                thread::spawn(move || {
+                    for _ in 0..200 {
+                        let iter = bitmap.iter().unset_only();
+                        if let Some((id, _)) = iter.continue_write().next() {
+                            let mut guard = claimed.lock().unwrap();
+                            assert!(guard.insert(id), "Duplicate ID claimed: {}", id);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let claimed = claimed.lock().unwrap();
+        // Should have claimed 800 unique IDs (4 threads * 200 each)
+        assert_eq!(claimed.len(), 800, "Expected 800 unique IDs, got {}", claimed.len());
+
+        // None should be GT IDs
+        for &id in claimed.iter() {
+            assert!(id >= 100, "Claimed ID {} should not be in GT range [0, 100)", id);
+        }
+    }
+
+    /// Test Zipfian distribution with GT protection
+    #[test]
+    fn test_gt_bitmap_zipfian() {
+        use keyspace_tracker::{AccessDistribution, PrefixTracker, TrackerConfig};
+        use std::collections::HashSet;
+
+        let max_id = 100u64;
+        let config = TrackerConfig::simple("test:")
+            .with_max_id(max_id)
+            .with_initial_capacity(max_id as usize);
+        let gt_bitmap = PrefixTracker::new(config);
+
+        // Mark first 10 IDs as GT (hot keys in Zipfian)
+        for id in 0..10 {
+            gt_bitmap.add(id);
+        }
+
+        // Use Zipfian distribution
+        let mut claimed: HashSet<u64> = HashSet::new();
+        let mut iter = gt_bitmap
+            .iter()
+            .unset_only()
+            .distribution(AccessDistribution::Zipfian { skew: 1.0 })
+            .seed(42)
+            .continue_write();
+        while let Some((id, _)) = iter.next() {
+            if id >= max_id {
+                break;
+            }
+            claimed.insert(id);
+        }
+
+        // Should have claimed 90 IDs (100 - 10 GT)
+        assert_eq!(claimed.len(), 90, "Should have 90 deleteable IDs, got {}", claimed.len());
+
+        // No GT IDs should be claimed
+        for id in 0..10 {
+            assert!(!claimed.contains(&id), "GT ID {} should not be claimed", id);
+        }
     }
 }

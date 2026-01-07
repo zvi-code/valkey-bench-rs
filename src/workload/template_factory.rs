@@ -163,6 +163,15 @@ pub fn create_template_with_address(
                 .arg_prefixed_key(&sc.prefix, key_width)
         }
 
+        WorkloadType::VecDelProtected => {
+            let sc = search_config.expect("VecDelProtected requires search config");
+            // Same as VecDelete - just DEL with prefixed key
+            // The GT protection is handled by ProtectedDeleteContext
+            CommandTemplate::new("DEL")
+                .arg_str("DEL")
+                .arg_prefixed_key(&sc.prefix, key_width)
+        }
+
         WorkloadType::VecUpdate => {
             let sc = search_config.expect("VecUpdate requires search config");
             create_vec_load_template(sc, key_width)

@@ -297,7 +297,8 @@ fn run_optimization(
     // Build protected IDs for vec-delete (skip ground truth vectors)
     let has_vec_delete = base_config.tests.iter().any(|t| {
         let lower = t.to_lowercase();
-        lower.contains("delete")
+        // Match both "vec-delete" and "vec-del-protected"
+        lower.contains("delete") || lower.contains("del-protected")
     });
     if has_vec_delete && dataset.is_some() {
         info!("Building protected vector IDs from ground truth...");
@@ -663,7 +664,8 @@ fn run() -> Result<()> {
     // The orchestrator.build_protected_ids() will only succeed if a dataset is loaded
     let has_vec_delete = config.tests.iter().any(|t| {
         let lower = t.to_lowercase();
-        lower.contains("delete")
+        // Match both "vec-delete" and "vec-del-protected"
+        lower.contains("delete") || lower.contains("del-protected")
     });
     if has_vec_delete {
         // Try to build protected IDs - will fail gracefully if no dataset

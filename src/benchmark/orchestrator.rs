@@ -999,6 +999,22 @@ impl Orchestrator {
                 }
             } else {
                 // Vector and other workloads use the existing function
+                // VecDelProtected needs per-worker limits (each worker has independent context)
+                // Other vector workloads share state (existence_map) so use total limit
+                let worker_limit = if matches!(workload, WorkloadType::VecDelProtected) {
+                    total_requests.map(|total| {
+                        let per_worker = total / total_workers as u64;
+                        // Last worker gets any remainder
+                        if worker_id == total_workers - 1 {
+                            per_worker + (total % total_workers as u64)
+                        } else {
+                            per_worker
+                        }
+                    })
+                } else {
+                    // VecLoad, VecQuery, VecUpdate share atomic cursors - use full limit
+                    total_requests
+                };
                 create_workload_context_with_iteration(
                     workload,
                     self.dataset.clone(),
@@ -1012,7 +1028,7 @@ impl Orchestrator {
                     k,
                     key_prefix,
                     self.config.iteration.as_deref(),
-                    total_requests, // Pass request limit to context
+                    worker_limit,
                 )
             };
 

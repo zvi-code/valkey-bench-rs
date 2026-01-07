@@ -30,6 +30,8 @@ pub enum WorkloadType {
     VecQuery,
     /// Delete vector keys
     VecDelete,
+    /// Delete vectors with GT protection (simple bitmap-based approach)
+    VecDelProtected,
     /// Update existing vectors
     VecUpdate,
 
@@ -62,6 +64,7 @@ impl WorkloadType {
             "vecload" | "vec-load" | "vec_load" => Some(Self::VecLoad),
             "vecquery" | "vec-query" | "vec_query" => Some(Self::VecQuery),
             "vecdelete" | "vec-delete" | "vec_delete" => Some(Self::VecDelete),
+            "vecdelprotected" | "vec-del-protected" | "vec_del_protected" => Some(Self::VecDelProtected),
             "vecupdate" | "vec-update" | "vec_update" => Some(Self::VecUpdate),
             _ => None,
         }
@@ -91,6 +94,7 @@ impl WorkloadType {
             Self::VecLoad => "VECLOAD",
             Self::VecQuery => "VECQUERY",
             Self::VecDelete => "VECDELETE",
+            Self::VecDelProtected => "VECDELPROTECTED",
             Self::VecUpdate => "VECUPDATE",
             Self::Custom => "CUSTOM",
         }
@@ -98,14 +102,14 @@ impl WorkloadType {
 
     /// Check if workload requires dataset
     pub fn requires_dataset(&self) -> bool {
-        matches!(self, Self::VecLoad | Self::VecQuery | Self::VecUpdate | Self::VecDelete)
+        matches!(self, Self::VecLoad | Self::VecQuery | Self::VecUpdate | Self::VecDelete | Self::VecDelProtected)
     }
 
     /// Check if workload is a vector search operation
     pub fn is_vector_search(&self) -> bool {
         matches!(
             self,
-            Self::VecLoad | Self::VecQuery | Self::VecDelete | Self::VecUpdate
+            Self::VecLoad | Self::VecQuery | Self::VecDelete | Self::VecDelProtected | Self::VecUpdate
         )
     }
 
