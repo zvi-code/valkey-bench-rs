@@ -1,12 +1,13 @@
-//! Cluster Tag Mapping
+//! Vector ID Existence Mapping
 //!
-//! Maps vector IDs to their cluster tags (hash tags) for proper routing
-//! and recall validation in cluster mode.
+//! Tracks which vector IDs exist in the cluster for recall validation
+//! and partial prefill support using a compact bitmap representation.
 //!
-//! Key format: `prefix + cluster_tag + ':' + vector_id`
-//! Example: `vec:{ABC}:000001` where `vec:` is prefix, `{ABC}` is cluster tag
+//! Key format: `prefix + vector_id`
+//! Example: `vec:000001` where `vec:` is prefix
 //!
-//! The cluster tag determines which hash slot (and thus which node) a key belongs to.
+//! Note: Cluster hash tag injection has been removed. Keys are now
+//! distributed across cluster slots based on their natural hash.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -16,52 +17,25 @@ use crate::client::{ControlPlane, RawConnection};
 use crate::cluster::ClusterNode;
 use crate::utils::{RespEncoder, RespValue};
 
-/// Vector ID to cluster tag mapping entry
-#[derive(Debug, Clone, Default)]
-pub struct VectorClusterMapping {
-    /// Cluster tag (e.g., "{ABC}") - 5 chars + null
-    pub cluster_tag: [u8; 6],
-}
-
-impl VectorClusterMapping {
-    /// Check if this mapping has a valid tag
-    pub fn has_tag(&self) -> bool {
-        self.cluster_tag[0] == b'{'
-    }
-
-    /// Get cluster tag as string slice
-    pub fn tag_str(&self) -> Option<&str> {
-        if self.has_tag() {
-            // Find the actual length (up to null terminator or end)
-            let len = self.cluster_tag.iter().position(|&b| b == 0).unwrap_or(5);
-            std::str::from_utf8(&self.cluster_tag[..len]).ok()
-        } else {
-            None
-        }
-    }
-
-    /// Set cluster tag from string
-    pub fn set_tag(&mut self, tag: &str) {
-        let bytes = tag.as_bytes();
-        let len = bytes.len().min(5);
-        self.cluster_tag[..len].copy_from_slice(&bytes[..len]);
-        self.cluster_tag[len] = 0;
-    }
-}
-
-/// Thread-safe cluster tag mapping table
+/// Thread-safe bitmap-based existence tracking table
+/// 
+/// Uses 1 bit per vector ID (8x more memory efficient than previous 1-byte-per-entry).
+/// For 10M vectors, requires ~1.25MB instead of ~10MB.
 pub struct ClusterTagMap {
     /// Key prefix (e.g., "vec:")
     pub prefix: String,
-    /// Mappings from vector_id to cluster_tag
-    mappings: Vec<VectorClusterMapping>,
-    /// Number of valid mappings
+    /// Bitmap: each bit represents existence of a vector ID
+    /// bit index = vector_id, bit value 1 = exists
+    bitmap: Vec<AtomicU64>,
+    /// Total capacity in vector IDs
+    capacity: u64,
+    /// Number of valid mappings (vectors that exist)
     count: AtomicU64,
     /// Total keys scanned (for progress tracking)
     keys_scanned: AtomicU64,
     /// Whether cluster mode is enabled
     pub is_cluster_mode: bool,
-    /// Mutex for concurrent updates
+    /// Mutex for concurrent updates (only needed for count updates)
     update_mutex: Mutex<()>,
     /// Atomic counter for claiming unmapped vector IDs (for partial prefill)
     unmapped_counter: AtomicU64,
@@ -69,10 +43,19 @@ pub struct ClusterTagMap {
 
 impl ClusterTagMap {
     /// Create a new cluster tag map with given capacity
+    /// 
+    /// The bitmap uses 1 bit per vector ID, so capacity of 1M vectors uses ~125KB.
     pub fn new(prefix: &str, capacity: u64, is_cluster_mode: bool) -> Self {
+        // Calculate number of u64 words needed (64 bits per word)
+        let num_words = ((capacity + 63) / 64) as usize;
+        let bitmap: Vec<AtomicU64> = (0..num_words)
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        
         Self {
             prefix: prefix.to_string(),
-            mappings: vec![VectorClusterMapping::default(); capacity as usize],
+            bitmap,
+            capacity,
             count: AtomicU64::new(0),
             keys_scanned: AtomicU64::new(0),
             is_cluster_mode,
@@ -81,52 +64,41 @@ impl ClusterTagMap {
         }
     }
 
-    /// Add a vector ID to cluster tag mapping
-    pub fn add_mapping(&self, vector_id: u64, cluster_tag: &str) {
-        if vector_id >= self.mappings.len() as u64 {
+    /// Add a vector ID mapping (marks as existing)
+    ///
+    /// The cluster_tag parameter is ignored - cluster tags are no longer stored.
+    /// This function just marks the vector ID as existing in the bitmap.
+    pub fn add_mapping(&self, vector_id: u64, _cluster_tag: &str) {
+        if vector_id >= self.capacity {
             return;
         }
 
         self.keys_scanned.fetch_add(1, Ordering::Relaxed);
 
-        // Safety: We're using interior mutability with proper synchronization
-        let _lock = self.update_mutex.lock().unwrap();
+        let word_idx = (vector_id / 64) as usize;
+        let bit_idx = (vector_id % 64) as u32;
+        let bit_mask = 1u64 << bit_idx;
 
-        // SAFETY: We hold the mutex, so we can safely mutate
-        let mapping = unsafe {
-            let ptr = self.mappings.as_ptr() as *mut VectorClusterMapping;
-            &mut *ptr.add(vector_id as usize)
-        };
-
-        if !mapping.has_tag() {
-            // New entry
-            if self.is_cluster_mode {
-                mapping.set_tag(cluster_tag);
-            } else {
-                // Dummy tag for non-cluster mode
-                mapping.set_tag("{CMD}");
-            }
+        // Atomically set the bit
+        let old_word = self.bitmap[word_idx].fetch_or(bit_mask, Ordering::Relaxed);
+        
+        // If bit wasn't already set, increment count
+        if (old_word & bit_mask) == 0 {
             self.count.fetch_add(1, Ordering::Relaxed);
-        } else if self.is_cluster_mode {
-            // Update existing
-            mapping.set_tag(cluster_tag);
         }
-    }
-
-    /// Get cluster tag for a vector ID
-    pub fn get_tag(&self, vector_id: u64) -> Option<&str> {
-        if vector_id >= self.mappings.len() as u64 || !self.is_cluster_mode {
-            return None;
-        }
-        self.mappings[vector_id as usize].tag_str()
     }
 
     /// Check if a vector exists in the cluster
     pub fn vector_exists(&self, vector_id: u64) -> bool {
-        if vector_id >= self.mappings.len() as u64 {
+        if vector_id >= self.capacity {
             return false;
         }
-        self.mappings[vector_id as usize].has_tag()
+
+        let word_idx = (vector_id / 64) as usize;
+        let bit_idx = (vector_id % 64) as u32;
+        let bit_mask = 1u64 << bit_idx;
+
+        (self.bitmap[word_idx].load(Ordering::Relaxed) & bit_mask) != 0
     }
 
     /// Get number of mapped vectors
@@ -141,7 +113,7 @@ impl ClusterTagMap {
 
     /// Get capacity
     pub fn capacity(&self) -> usize {
-        self.mappings.len()
+        self.capacity as usize
     }
 
     /// Claim the next unmapped vector ID (for partial prefill support)
@@ -172,6 +144,11 @@ impl ClusterTagMap {
     /// Get current unmapped counter value (for progress tracking)
     pub fn unmapped_counter_value(&self) -> u64 {
         self.unmapped_counter.load(Ordering::Relaxed)
+    }
+    
+    /// Get memory usage in bytes
+    pub fn memory_usage_bytes(&self) -> usize {
+        self.bitmap.len() * std::mem::size_of::<AtomicU64>()
     }
 }
 
@@ -213,22 +190,22 @@ pub struct ClusterScanResults {
     pub keys_per_second: f64,
 }
 
-/// Extract vector ID and cluster tag from a key
+/// Extract vector ID from a key
 ///
 /// Uses the unified key format from workload::key_format module.
-/// Key format: `prefix{tag}:vector_id`
-/// Example: `vec:{ABC}:000123`
+/// Key format: `prefix + vector_id`
+/// Example: `vec:000123`
 ///
-/// Returns (vector_id, cluster_tag) if successfully parsed
+/// Returns (vector_id, empty_string) for backward compatibility.
+/// The cluster_tag return value is always empty since tags are no longer used.
 pub fn parse_vector_key(key: &str, prefix: &str) -> Option<(u64, String)> {
     use crate::workload::key_format::{KeyFormat, DEFAULT_KEY_WIDTH};
 
-    let format = KeyFormat::with_cluster_tags(prefix, DEFAULT_KEY_WIDTH);
-    let (vector_id, tag_opt) = format.parse_key(key)?;
+    let format = KeyFormat::new(prefix, DEFAULT_KEY_WIDTH);
+    let (vector_id, _tag_opt) = format.parse_key(key)?;
 
-    // Cluster tag is required for this function
-    let cluster_tag = tag_opt?;
-    Some((vector_id, cluster_tag))
+    // Return empty string for cluster_tag (backward compat)
+    Some((vector_id, String::new()))
 }
 
 /// Build vector ID mappings by scanning cluster nodes
@@ -421,58 +398,119 @@ mod tests {
 
     #[test]
     fn test_parse_vector_key() {
-        // Standard format: prefix{tag}:id
-        let result = parse_vector_key("vec:{ABC}:000123", "vec:");
-        assert_eq!(result, Some((123, "{ABC}".to_string())));
+        // Simple format: prefix + id (no cluster tags)
+        let result = parse_vector_key("vec:000123", "vec:");
+        assert_eq!(result, Some((123, String::new())));
 
-        // Without colon separator
-        let result = parse_vector_key("vec:{XYZ}000456", "vec:");
-        assert_eq!(result, Some((456, "{XYZ}".to_string())));
+        // With more digits
+        let result = parse_vector_key("vec:000456", "vec:");
+        assert_eq!(result, Some((456, String::new())));
 
         // Wrong prefix
-        let result = parse_vector_key("other:{ABC}:000123", "vec:");
-        assert!(result.is_none());
-
-        // No tag
-        let result = parse_vector_key("vec:000123", "vec:");
+        let result = parse_vector_key("other:000123", "vec:");
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_cluster_tag_map() {
+    fn test_cluster_tag_map_bitmap() {
         let map = ClusterTagMap::new("vec:", 1000, true);
 
-        map.add_mapping(0, "{ABC}");
-        map.add_mapping(1, "{XYZ}");
+        // Tags are ignored, just marks existence
+        map.add_mapping(0, "");
+        map.add_mapping(1, "");
+        map.add_mapping(999, "");
 
         assert!(map.vector_exists(0));
         assert!(map.vector_exists(1));
+        assert!(map.vector_exists(999));
         assert!(!map.vector_exists(2));
+        assert!(!map.vector_exists(500));
 
-        assert_eq!(map.get_tag(0), Some("{ABC}"));
-        assert_eq!(map.get_tag(1), Some("{XYZ}"));
-        assert_eq!(map.count(), 2);
+        assert_eq!(map.count(), 3);
+    }
+
+    #[test]
+    fn test_bitmap_memory_efficiency() {
+        // 1M vectors should use ~128KB (1M / 8 bytes)
+        let map = ClusterTagMap::new("vec:", 1_000_000, true);
+        
+        // Each u64 holds 64 bits, so 1M vectors needs ~15625 u64s
+        // 15625 * 8 bytes = 125KB
+        let expected_bytes = ((1_000_000 + 63) / 64) * 8;
+        assert_eq!(map.memory_usage_bytes(), expected_bytes as usize);
+    }
+
+    #[test]
+    fn test_bitmap_boundary_cases() {
+        let map = ClusterTagMap::new("vec:", 128, true);
+
+        // Test at word boundaries (every 64 bits)
+        map.add_mapping(0, "");
+        map.add_mapping(63, "");
+        map.add_mapping(64, "");
+        map.add_mapping(127, "");
+
+        assert!(map.vector_exists(0));
+        assert!(map.vector_exists(63));
+        assert!(map.vector_exists(64));
+        assert!(map.vector_exists(127));
+        assert!(!map.vector_exists(1));
+        assert!(!map.vector_exists(65));
+
+        assert_eq!(map.count(), 4);
+    }
+
+    #[test]
+    fn test_duplicate_add() {
+        let map = ClusterTagMap::new("vec:", 100, true);
+
+        // Adding same ID twice should only count once
+        map.add_mapping(42, "");
+        map.add_mapping(42, "");
+        map.add_mapping(42, "");
+
+        assert!(map.vector_exists(42));
+        assert_eq!(map.count(), 1);
+        assert_eq!(map.keys_scanned(), 3);
+    }
+
+    #[test]
+    fn test_out_of_bounds() {
+        let map = ClusterTagMap::new("vec:", 100, true);
+
+        // Should safely ignore out-of-bounds IDs
+        map.add_mapping(100, "");
+        map.add_mapping(1000, "");
+
+        assert!(!map.vector_exists(100));
+        assert!(!map.vector_exists(1000));
+        assert_eq!(map.count(), 0);
+    }
+
+    #[test]
+    fn test_claim_unmapped_id() {
+        let map = ClusterTagMap::new("vec:", 10, true);
+
+        // Mark some as existing
+        map.add_mapping(0, "");
+        map.add_mapping(2, "");
+        map.add_mapping(4, "");
+
+        // Should skip existing IDs
+        assert_eq!(map.claim_unmapped_id(10), Some(1));
+        assert_eq!(map.claim_unmapped_id(10), Some(3));
+        assert_eq!(map.claim_unmapped_id(10), Some(5));
+        assert_eq!(map.claim_unmapped_id(10), Some(6));
     }
 
     #[test]
     fn test_non_cluster_mode() {
         let map = ClusterTagMap::new("vec:", 1000, false);
 
-        map.add_mapping(0, "{ABC}");
-
-        // In non-cluster mode, get_tag returns None
-        assert!(map.get_tag(0).is_none());
-        // But vector_exists still works
+        map.add_mapping(0, "");
+        
+        // Works the same in non-cluster mode
         assert!(map.vector_exists(0));
-    }
-
-    #[test]
-    fn test_vector_cluster_mapping() {
-        let mut mapping = VectorClusterMapping::default();
-        assert!(!mapping.has_tag());
-
-        mapping.set_tag("{ABC}");
-        assert!(mapping.has_tag());
-        assert_eq!(mapping.tag_str(), Some("{ABC}"));
+        assert!(!map.vector_exists(1));
     }
 }

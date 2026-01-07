@@ -50,39 +50,37 @@ impl AddressConfig {
 
 /// Create command template for given workload type
 ///
-/// When `cluster_mode` is true, key-value commands will use cluster-tagged keys
-/// (e.g., `key:{ABC}:000000000001`) to ensure proper routing without MOVED redirects.
+/// The `cluster_mode` parameter is now ignored - all keys use simple format
+/// (e.g., `key:000000000001`). The cluster hash tag injection has been removed.
 pub fn create_template(
     workload: WorkloadType,
     key_prefix: &str,
     data_size: usize,
     search_config: Option<&SearchConfig>,
-    cluster_mode: bool,
+    _cluster_mode: bool, // Ignored: cluster hash tags removed
 ) -> CommandTemplate {
-    create_template_with_address(workload, key_prefix, data_size, search_config, cluster_mode, None)
+    create_template_with_address(workload, key_prefix, data_size, search_config, false, None)
 }
 
 /// Create command template with optional address configuration
 ///
 /// This variant allows specifying an AddressConfig to enable hash field or JSON path iteration.
 /// When address_config is provided with HashField type, HSET will use a Field placeholder.
+///
+/// Note: The `cluster_mode` parameter is now ignored. All keys use simple format.
 pub fn create_template_with_address(
     workload: WorkloadType,
     key_prefix: &str,
     data_size: usize,
     search_config: Option<&SearchConfig>,
-    cluster_mode: bool,
+    _cluster_mode: bool, // Ignored: cluster hash tags removed
     address_config: Option<&AddressConfig>,
 ) -> CommandTemplate {
     let key_width = DEFAULT_KEY_WIDTH;
 
-    // Helper to create key arg based on cluster mode
+    // All keys now use simple prefixed format (no cluster hash tags)
     let add_key = |template: CommandTemplate| -> CommandTemplate {
-        if cluster_mode {
-            template.arg_prefixed_key_with_cluster_tag(key_prefix, key_width)
-        } else {
-            template.arg_prefixed_key(key_prefix, key_width)
-        }
+        template.arg_prefixed_key(key_prefix, key_width)
     };
 
     match workload {
@@ -108,10 +106,10 @@ pub fn create_template_with_address(
 
         WorkloadType::Rpop => add_key(CommandTemplate::new("RPOP").arg_str("RPOP")),
 
-        WorkloadType::Lrange100 => create_lrange_template(key_prefix, key_width, 100, cluster_mode),
-        WorkloadType::Lrange300 => create_lrange_template(key_prefix, key_width, 300, cluster_mode),
-        WorkloadType::Lrange500 => create_lrange_template(key_prefix, key_width, 500, cluster_mode),
-        WorkloadType::Lrange600 => create_lrange_template(key_prefix, key_width, 600, cluster_mode),
+        WorkloadType::Lrange100 => create_lrange_template(key_prefix, key_width, 100),
+        WorkloadType::Lrange300 => create_lrange_template(key_prefix, key_width, 300),
+        WorkloadType::Lrange500 => create_lrange_template(key_prefix, key_width, 500),
+        WorkloadType::Lrange600 => create_lrange_template(key_prefix, key_width, 600),
 
         // === Set commands ===
         WorkloadType::Sadd => add_key(CommandTemplate::new("SADD").arg_str("SADD"))
@@ -144,9 +142,9 @@ pub fn create_template_with_address(
         WorkloadType::Zpopmin => add_key(CommandTemplate::new("ZPOPMIN").arg_str("ZPOPMIN")),
 
         // === Multi-key commands ===
-        WorkloadType::Mset => create_mset_template(key_prefix, key_width, data_size, 10, cluster_mode),
+        WorkloadType::Mset => create_mset_template(key_prefix, key_width, data_size, 10),
 
-        // === Vector search commands (always use cluster tags) ===
+        // === Vector search commands (simple key format) ===
         WorkloadType::VecLoad => {
             let sc = search_config.expect("VecLoad requires search config");
             create_vec_load_template(sc, key_width)
@@ -159,10 +157,10 @@ pub fn create_template_with_address(
 
         WorkloadType::VecDelete => {
             let sc = search_config.expect("VecDelete requires search config");
-            // Use cluster tag format for consistency with VecLoad
+            // Simple key format: prefix + zero-padded ID
             CommandTemplate::new("DEL")
                 .arg_str("DEL")
-                .arg_prefixed_key_with_cluster_tag(&sc.prefix, key_width)
+                .arg_prefixed_key(&sc.prefix, key_width)
         }
 
         WorkloadType::VecUpdate => {
@@ -178,17 +176,10 @@ pub fn create_template_with_address(
 }
 
 /// Create LRANGE template with specified count
-fn create_lrange_template(key_prefix: &str, key_width: usize, count: i32, cluster_mode: bool) -> CommandTemplate {
-    let template = CommandTemplate::new(&format!("LRANGE_{}", count))
-        .arg_str("LRANGE");
-    
-    let template = if cluster_mode {
-        template.arg_prefixed_key_with_cluster_tag(key_prefix, key_width)
-    } else {
-        template.arg_prefixed_key(key_prefix, key_width)
-    };
-    
-    template
+fn create_lrange_template(key_prefix: &str, key_width: usize, count: i32) -> CommandTemplate {
+    CommandTemplate::new(&format!("LRANGE_{}", count))
+        .arg_str("LRANGE")
+        .arg_prefixed_key(key_prefix, key_width)
         .arg_str("0")
         .arg_str(&(count - 1).to_string())
 }
@@ -199,16 +190,11 @@ fn create_mset_template(
     key_width: usize,
     data_size: usize,
     num_keys: usize,
-    cluster_mode: bool,
 ) -> CommandTemplate {
     let mut template = CommandTemplate::new("MSET").arg_str("MSET");
 
     for _ in 0..num_keys {
-        template = if cluster_mode {
-            template.arg_prefixed_key_with_cluster_tag(key_prefix, key_width)
-        } else {
-            template.arg_prefixed_key(key_prefix, key_width)
-        };
+        template = template.arg_prefixed_key(key_prefix, key_width);
         template = template.arg_literal(&vec![b'x'; data_size]);
     }
 
@@ -216,22 +202,21 @@ fn create_mset_template(
 }
 
 /// Create HSET template for vector loading
-/// Key format: prefix{tag}:vector_id (e.g., "zvec_:{ABC}:000000055083")
+/// Key format: prefix + zero-padded ID (e.g., "zvec_:000000055083")
 ///
 /// Fields added:
 /// - vector_field: <vector data> (always)
 /// - tag_field: <tag value> (if search_config.tag_field is set)
 /// - numeric_field(s): <numeric value> (from search_config.numeric_fields)
 fn create_vec_load_template(search_config: &SearchConfig, key_width: usize) -> CommandTemplate {
-    // Key format: prefix + cluster_tag + ":" + vector_id
-    // We use a compound key with cluster tag for proper shard distribution
+    // Simple key format: prefix + zero-padded vector ID
     let mut template = CommandTemplate::new("HSET")
         .arg_str("HSET")
-        .arg_prefixed_key_with_cluster_tag(&search_config.prefix, key_width)
+        .arg_prefixed_key(&search_config.prefix, key_width)
         .arg_str(&search_config.vector_field)
         .arg_vector(search_config.vec_byte_len());
 
-    // Add tag field if configured
+    // Add tag field if configured (this is INDEX tag field, NOT cluster hash tag)
     if let Some(ref tag_field) = search_config.tag_field {
         template = template
             .arg_str(tag_field)
@@ -339,10 +324,11 @@ mod tests {
 
     #[test]
     fn test_create_set_template_cluster_mode() {
+        // Note: cluster_mode parameter is now ignored (cluster hash tags removed)
         let template = create_template(WorkloadType::Set, "key:", 100, None, true);
         let buf = template.build(1);
-        // In cluster mode: cluster_tag + key = 2 placeholders
-        assert_eq!(buf.placeholders[0].len(), 2);
+        // All keys now use simple format: just 1 key placeholder
+        assert_eq!(buf.placeholders[0].len(), 1);
     }
 
     #[test]
@@ -378,9 +364,8 @@ mod tests {
         let template = create_template(WorkloadType::VecLoad, "key:", 3, Some(&search_config), false);
         let buf = template.build(1);
 
-        // Should have cluster_tag, key, and vector placeholders
-        // VecLoad uses arg_prefixed_key_with_cluster_tag which creates 2 placeholders (tag + key)
-        // Plus 1 for the vector = 3 total
-        assert_eq!(buf.placeholders[0].len(), 3);
+        // VecLoad now uses simple key format:
+        // 1 key placeholder + 1 vector placeholder = 2 total
+        assert_eq!(buf.placeholders[0].len(), 2);
     }
 }

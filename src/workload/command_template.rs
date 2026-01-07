@@ -6,9 +6,6 @@
 use crate::client::{CommandBuffer, PlaceholderOffset, PlaceholderType};
 use crate::utils::RespEncoder;
 
-// Import key format constants from the single source of truth
-use super::key_format::{CLUSTER_TAG_LEN, TAG_KEY_SEPARATOR};
-
 /// Template argument (literal or placeholder)
 #[derive(Debug, Clone)]
 pub enum TemplateArg {
@@ -24,13 +21,6 @@ pub enum TemplateArg {
         prefix: Vec<u8>,
         ph_type: PlaceholderType,
         len: usize,
-    },
-    /// Prefixed key with cluster tag placeholder for cluster mode
-    /// Format: prefix + {tag} + ":" + key
-    /// Example: "vec:{ABC}:000000055083"
-    PrefixedKeyWithClusterTag {
-        prefix: Vec<u8>,
-        key_width: usize,
     },
 }
 
@@ -182,17 +172,6 @@ impl CommandTemplate {
         self
     }
 
-    /// Add prefixed key with cluster tag placeholder for cluster mode
-    /// The key will be: prefix + {tag} + ":" + 0-padded decimal number
-    /// Example: "vec:{ABC}:000000055083"
-    pub fn arg_prefixed_key_with_cluster_tag(mut self, prefix: &str, key_width: usize) -> Self {
-        self.args.push(TemplateArg::PrefixedKeyWithClusterTag {
-            prefix: prefix.as_bytes().to_vec(),
-            key_width,
-        });
-        self
-    }
-
     /// Get template name
     pub fn name(&self) -> &str {
         &self.name
@@ -294,45 +273,6 @@ impl CommandTemplate {
 
                     // Write placeholder bytes (zeros)
                     encoder.buffer_mut().extend(std::iter::repeat_n(b'0', *len));
-                    encoder.buffer_mut().extend_from_slice(b"\r\n");
-                }
-                TemplateArg::PrefixedKeyWithClusterTag { prefix, key_width } => {
-                    // Format: prefix + {tag} + ":" + key
-                    // Example: "vec:{ABC}:000000055083"
-                    // Total length: prefix.len() + CLUSTER_TAG_LEN ({ABC}) + 1 (:) + key_width
-                    let total_len = prefix.len() + CLUSTER_TAG_LEN + 1 + key_width;
-                    encoder.buffer_mut().push(b'$');
-                    let len_str = total_len.to_string();
-                    encoder.buffer_mut().extend_from_slice(len_str.as_bytes());
-                    encoder.buffer_mut().extend_from_slice(b"\r\n");
-
-                    // Write prefix
-                    encoder.buffer_mut().extend_from_slice(prefix);
-
-                    // Record offset for cluster tag placeholder
-                    let tag_offset = encoder.as_bytes().len();
-                    placeholders.push(PlaceholderOffset {
-                        offset: tag_offset,
-                        len: CLUSTER_TAG_LEN,
-                        placeholder_type: PlaceholderType::ClusterTag,
-                    });
-
-                    // Write placeholder cluster tag {000}
-                    encoder.buffer_mut().extend_from_slice(b"{000}");
-
-                    // Write separator (from key_format::TAG_KEY_SEPARATOR)
-                    encoder.buffer_mut().push(TAG_KEY_SEPARATOR as u8);
-
-                    // Record offset for key placeholder
-                    let key_offset = encoder.as_bytes().len();
-                    placeholders.push(PlaceholderOffset {
-                        offset: key_offset,
-                        len: *key_width,
-                        placeholder_type: PlaceholderType::Key,
-                    });
-
-                    // Write placeholder key (zeros)
-                    encoder.buffer_mut().extend(std::iter::repeat_n(b'0', *key_width));
                     encoder.buffer_mut().extend_from_slice(b"\r\n");
                 }
             }
