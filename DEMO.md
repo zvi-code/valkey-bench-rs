@@ -595,7 +595,169 @@ Recall@10 (GT-Adjusted): 0.9876 (matched/total existing GT neighbors)
 
 4. **Practical Insight**: GT-protected deletion proves the recall computation is valid - if GT vectors are preserved, recall measurements remain meaningful even after massive deletion
 
-### 7.9 Protection Modes
+### 7.9 Delete/Refill Cycles (Churn Simulation)
+
+This demonstrates realistic churn: delete 50% of vectors, query, refill, repeat.
+
+#### Setup: Fresh 1M Vector Load
+
+```bash
+# Clean start
+./target/release/valkey-bench-rs --cli -h $HOST -- FLUSHALL
+./target/release/valkey-bench-rs --cli -h $HOST -- FT.DROPINDEX cohere-1m 2>&1 || true
+./target/release/valkey-bench-rs --cli -h $HOST -- \
+  FT.CREATE cohere-1m ON HASH PREFIX 1 vec: SCHEMA \
+  embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE
+
+# Load 1M vectors
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-load -n 1000000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -c 200 --threads 16 --quiet
+
+./target/release/valkey-bench-rs --cli -h $HOST -- DBSIZE
+# (integer) 1000000
+```
+
+#### Baseline Recall
+
+```bash
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-query -n 1000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -k 10 --ef-search 200 \
+  -c 50 --threads 4
+```
+**Result:** `Recall: avg=0.9775 | perfect=3579 zero=7`
+
+#### Cycle 1: Delete 50%, Query, Refill
+
+```bash
+# Delete 500K vectors (protecting GT)
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-del-protected -n 500000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -c 100 --threads 8
+```
+**Result:** `Throughput: 54,644 req/s | Requests: 500,001`
+
+```bash
+./target/release/valkey-bench-rs --cli -h $HOST -- DBSIZE
+# (integer) 499999
+```
+
+```bash
+# Query and check recall
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-query -n 1000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -k 10 --ef-search 200 \
+  -c 50 --threads 4
+```
+**Result:** `Recall: avg=0.9833 | perfect=3642 zero=0` ✅ Recall improved (GT protected!)
+
+```bash
+# Refill back to 1M
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-load -n 1000000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -c 200 --threads 16 --quiet
+
+./target/release/valkey-bench-rs --cli -h $HOST -- DBSIZE
+# (integer) 1000000
+```
+
+#### Cycle 2: Delete 50% Again, Query, Refill
+
+```bash
+# Delete another 500K
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-del-protected -n 500000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -c 100 --threads 8
+```
+**Result:** `Throughput: 56,170 req/s | Requests: 500,000`
+
+```bash
+./target/release/valkey-bench-rs --cli -h $HOST -- DBSIZE
+# (integer) 500000
+
+# Query again
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-query -n 1000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -k 10 --ef-search 200 \
+  -c 50 --threads 4
+```
+**Result:** `Recall: avg=0.9833 | perfect=3639 zero=0` ✅ Recall stable!
+
+```bash
+# Refill again
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-load -n 1000000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -c 200 --threads 16 --quiet
+
+./target/release/valkey-bench-rs --cli -h $HOST -- DBSIZE
+# (integer) 1000000
+```
+
+#### Final Query After 2 Cycles
+
+```bash
+./target/release/valkey-bench-rs -h $HOST --cluster \
+  --schema datasets/cohere-medium-1m.yaml \
+  --data datasets/cohere-medium-1m.bin \
+  -t vec-query -n 1000 \
+  --search-index cohere-1m \
+  --search-prefix "vec:" \
+  -k 10 --ef-search 200 \
+  -c 50 --threads 4
+```
+**Result:** `Recall: avg=0.9784 | perfect=3535 zero=2` ✅ Back to baseline
+
+#### Results Summary
+
+| Phase | DBSIZE | Recall | Perfect@10 | Zero@10 |
+|-------|--------|--------|------------|---------|
+| Initial | 1,000,000 | **0.9775** | 3,579 | 7 |
+| After Delete 1 | 500,000 | **0.9833** | 3,642 | 0 |
+| After Refill 1 | 1,000,000 | - | - | - |
+| After Delete 2 | 500,000 | **0.9833** | 3,639 | 0 |
+| After Refill 2 | 1,000,000 | **0.9784** | 3,535 | 2 |
+
+**Key Insights:**
+
+1. **GT Protection Works**: Recall *improves* after deletion (0.9775 → 0.9833) because non-GT noise is removed
+2. **Zero "zero-recall" queries**: After deletion, all queries find their GT neighbors (zero=0)
+3. **Recall Stable Across Cycles**: Both delete phases show identical recall (~0.983)
+4. **Full Recovery**: After refill, recall returns to baseline (~0.978)
+
+### 7.10 Protection Modes
 
 The benchmark supports three GT protection modes:
 

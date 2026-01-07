@@ -26,6 +26,8 @@ pub enum WorkloadType {
     // === Vector search workloads ===
     /// Load vectors with HSET
     VecLoad,
+    /// Load only ground truth vectors
+    VecGtLoad,
     /// Query vectors with FT.SEARCH
     VecQuery,
     /// Delete vector keys
@@ -62,6 +64,7 @@ impl WorkloadType {
             "lrange_600" | "lrange600" => Some(Self::Lrange600),
             "mset" => Some(Self::Mset),
             "vecload" | "vec-load" | "vec_load" => Some(Self::VecLoad),
+            "vecgtload" | "vec-gt-load" | "vec_gt_load" => Some(Self::VecGtLoad),
             "vecquery" | "vec-query" | "vec_query" => Some(Self::VecQuery),
             "vecdelete" | "vec-delete" | "vec_delete" => Some(Self::VecDelete),
             "vecdelprotected" | "vec-del-protected" | "vec_del_protected" => Some(Self::VecDelProtected),
@@ -92,6 +95,7 @@ impl WorkloadType {
             Self::Lrange600 => "LRANGE_600",
             Self::Mset => "MSET",
             Self::VecLoad => "VECLOAD",
+            Self::VecGtLoad => "VECGTLOAD",
             Self::VecQuery => "VECQUERY",
             Self::VecDelete => "VECDELETE",
             Self::VecDelProtected => "VECDELPROTECTED",
@@ -102,14 +106,14 @@ impl WorkloadType {
 
     /// Check if workload requires dataset
     pub fn requires_dataset(&self) -> bool {
-        matches!(self, Self::VecLoad | Self::VecQuery | Self::VecUpdate | Self::VecDelete | Self::VecDelProtected)
+        matches!(self, Self::VecLoad | Self::VecGtLoad | Self::VecQuery | Self::VecUpdate | Self::VecDelete | Self::VecDelProtected)
     }
 
     /// Check if workload is a vector search operation
     pub fn is_vector_search(&self) -> bool {
         matches!(
             self,
-            Self::VecLoad | Self::VecQuery | Self::VecDelete | Self::VecDelProtected | Self::VecUpdate
+            Self::VecLoad | Self::VecGtLoad | Self::VecQuery | Self::VecDelete | Self::VecDelProtected | Self::VecUpdate
         )
     }
 

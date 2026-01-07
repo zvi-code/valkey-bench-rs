@@ -206,8 +206,12 @@ impl VectorExistenceMap {
 pub struct ProtectedIds {
     /// Reference set of protected IDs
     reference_set: ReferenceSet,
-    /// Atomic counter for claiming deleteable IDs
+    /// Atomic counter for deletion iteration cursor
     delete_counter: AtomicU64,
+    /// Counter of successfully claimed (non-GT) IDs for deletion
+    claimed_count: AtomicU64,
+    /// Atomic counter for GT load iteration
+    gt_load_counter: AtomicU64,
     /// Maximum vector ID
     max_id: u64,
 }
@@ -219,6 +223,8 @@ impl ProtectedIds {
         Self {
             reference_set,
             delete_counter: AtomicU64::new(0),
+            claimed_count: AtomicU64::new(0),
+            gt_load_counter: AtomicU64::new(0),
             max_id,
         }
     }
@@ -244,9 +250,25 @@ impl ProtectedIds {
                 return None;
             }
             if !self.reference_set.contains(candidate) {
+                self.claimed_count.fetch_add(1, Ordering::Relaxed);
                 return Some(candidate);
             }
         }
+    }
+
+    /// Get count of claimed deleteable IDs
+    #[inline]
+    pub fn claimed_count(&self) -> u64 {
+        self.claimed_count.load(Ordering::Relaxed)
+    }
+
+    /// Claim the next ground truth vector ID for loading
+    ///
+    /// Returns None when all GT vectors have been claimed.
+    /// Uses a shared atomic counter to ensure each GT ID is only loaded once.
+    pub fn claim_gt_id(&self) -> Option<u64> {
+        let idx = self.gt_load_counter.fetch_add(1, Ordering::Relaxed);
+        self.reference_set.get_nth(idx)
     }
 
     /// Get number of protected IDs

@@ -294,13 +294,13 @@ fn run_optimization(
         orchestrator.build_existence_map()?;
     }
 
-    // Build protected IDs for vec-delete (skip ground truth vectors)
-    let has_vec_delete = base_config.tests.iter().any(|t| {
+    // Build protected IDs for workloads that need ground truth
+    let needs_protected_ids = base_config.tests.iter().any(|t| {
         let lower = t.to_lowercase();
-        // Match both "vec-delete" and "vec-del-protected"
-        lower.contains("delete") || lower.contains("del-protected")
+        // Match vec-delete, vec-del-protected, and vec-gt-load
+        lower.contains("delete") || lower.contains("del-protected") || lower.contains("gt-load")
     });
-    if has_vec_delete && dataset.is_some() {
+    if needs_protected_ids && dataset.is_some() {
         info!("Building protected vector IDs from ground truth...");
         orchestrator.build_protected_ids()?;
     }
@@ -660,14 +660,14 @@ fn run() -> Result<()> {
             orchestrator.build_existence_map()?;
         }
 
-    // Build protected IDs for vec-delete (skip ground truth vectors)
+    // Build protected IDs for workloads that need ground truth
     // The orchestrator.build_protected_ids() will only succeed if a dataset is loaded
-    let has_vec_delete = config.tests.iter().any(|t| {
+    let needs_protected_ids = config.tests.iter().any(|t| {
         let lower = t.to_lowercase();
-        // Match both "vec-delete" and "vec-del-protected"
-        lower.contains("delete") || lower.contains("del-protected")
+        // Match vec-delete, vec-del-protected, and vec-gt-load
+        lower.contains("delete") || lower.contains("del-protected") || lower.contains("gt-load")
     });
-    if has_vec_delete {
+    if needs_protected_ids {
         // Try to build protected IDs - will fail gracefully if no dataset
         if let Err(e) = orchestrator.build_protected_ids() {
             info!("Note: Cannot build protected IDs: {} (deletion will not skip ground truth)", e);

@@ -1249,192 +1249,63 @@ impl WorkloadContext for VectorDeleteContext {
 }
 
 // =============================================================================
-// ProtectedDeleteContext - Simple bitmap-based GT protection for VecDelProtected
+// ProtectedDeleteContext - Uses shared ProtectedIds for VecDelProtected
 // =============================================================================
 
-/// Context for vector deletion with simple bitmap-based GT protection
+/// Context for vector deletion with GT protection
 ///
-/// This is the **elegant solution** for protected deletion:
-/// - GT vector IDs are marked as SET in a bitmap (PrefixTracker)
-/// - Iteration uses `unset_only()` to skip GT IDs automatically
-/// - Supports all iteration strategies: sequential, random, zipfian
-/// - No complex multi-component coordination needed
-///
-/// # How it works
-///
-/// 1. Create a PrefixTracker with max_id = num_vectors
-/// 2. Mark all GT vector IDs as SET in the tracker
-/// 3. Use `unset_only().continue_write()` to iterate only on non-GT IDs
-///
-/// The `unset_only()` filter ensures that:
-/// - GT vectors are never returned (they are SET in the bitmap)
-/// - Only deleteable vectors (UNSET) are returned
-/// - Works with any iteration strategy (sequential, random, zipfian)
-///
-/// # Example
-///
-/// ```ignore
-/// // GT IDs: [5, 10, 15, 20]
-/// let gt_bitmap = Arc::new(PrefixTracker::new(config));
-/// for id in gt_ids {
-///     gt_bitmap.add(id);  // Mark GT as SET
-/// }
-///
-/// // Create context - will only iterate on non-GT IDs
-/// let ctx = ProtectedDeleteContext::new(dataset, gt_bitmap, strategy);
-///
-/// // Iteration skips 5, 10, 15, 20 automatically
-/// ctx.claim_next_id()  // Returns Some(0), Some(1), ..., skips 5, ...
-/// ```
+/// Uses shared ProtectedIds (like VecLoad uses shared VectorExistenceMap).
+/// All workers share the same atomic cursor via Arc<ProtectedIds>.
 pub struct ProtectedDeleteContext {
-    dataset: Arc<DatasetContext>,
-    /// Bitmap where SET = GT (protected), UNSET = deleteable
-    gt_bitmap: Arc<PrefixTracker>,
-    /// Iteration strategy
-    strategy: IterationStrategy,
-    /// Optional request limit
+    /// Shared protected IDs with atomic cursor
+    protected_ids: Arc<ProtectedIds>,
+    /// Max ID (num_vectors)
+    max_id: u64,
+    /// Request limit (total across all workers)
     request_limit: Option<u64>,
-    /// Counter for requests claimed
+    /// Requests claimed counter (shared would need Arc, but limit check is per-invocation)
     requests_claimed: AtomicU64,
 }
 
 impl ProtectedDeleteContext {
-    /// Create with GT bitmap (GT IDs should already be SET in the tracker)
-    ///
-    /// The gt_bitmap should have GT vector IDs marked as SET.
-    /// Iteration will only return UNSET IDs (non-GT, deleteable).
-    pub fn new(
-        dataset: Arc<DatasetContext>,
-        gt_bitmap: Arc<PrefixTracker>,
-        strategy: IterationStrategy,
-    ) -> Self {
+    /// Create with shared ProtectedIds
+    pub fn new(protected_ids: Arc<ProtectedIds>, max_id: u64, request_limit: Option<u64>) -> Self {
         Self {
-            dataset,
-            gt_bitmap,
-            strategy,
-            request_limit: None,
-            requests_claimed: AtomicU64::new(0),
-        }
-    }
-
-    /// Create with GT bitmap and optional request limit
-    pub fn with_limit(
-        dataset: Arc<DatasetContext>,
-        gt_bitmap: Arc<PrefixTracker>,
-        strategy: IterationStrategy,
-        request_limit: Option<u64>,
-    ) -> Self {
-        Self {
-            dataset,
-            gt_bitmap,
-            strategy,
+            protected_ids,
+            max_id,
             request_limit,
             requests_claimed: AtomicU64::new(0),
         }
     }
 
-    /// Create from an iterator of GT IDs
-    ///
-    /// Convenience constructor that creates the GT bitmap internally.
-    pub fn from_gt_ids(
-        dataset: Arc<DatasetContext>,
-        gt_ids: impl IntoIterator<Item = u64>,
-        strategy: IterationStrategy,
-    ) -> Self {
-        Self::from_gt_ids_with_limit(dataset, gt_ids, strategy, None)
-    }
-
-    /// Create from an iterator of GT IDs with optional request limit
-    pub fn from_gt_ids_with_limit(
-        dataset: Arc<DatasetContext>,
-        gt_ids: impl IntoIterator<Item = u64>,
-        strategy: IterationStrategy,
-        request_limit: Option<u64>,
-    ) -> Self {
-        let num_vectors = dataset.num_vectors();
-        let prefix = format!("gt:{}:", dataset.name());
-        let config = TrackerConfig::simple(&prefix)
-            .with_max_id(num_vectors)
-            .with_initial_capacity(num_vectors as usize);
-        let gt_bitmap = Arc::new(PrefixTracker::new(config));
-
-        // Mark all GT IDs as SET (protected)
-        for id in gt_ids {
-            if id < num_vectors {
-                gt_bitmap.add(id);
-            }
-        }
-
-        Self::with_limit(dataset, gt_bitmap, strategy, request_limit)
-    }
-
-    /// Get the GT bitmap for external inspection
-    pub fn gt_bitmap(&self) -> &Arc<PrefixTracker> {
-        &self.gt_bitmap
-    }
-
     /// Get count of protected (GT) IDs
     pub fn protected_count(&self) -> u64 {
-        self.gt_bitmap.count()
+        self.protected_ids.protected_count()
     }
 
     /// Get count of deleteable (non-GT) IDs
     pub fn deleteable_count(&self) -> u64 {
-        self.dataset.num_vectors().saturating_sub(self.gt_bitmap.count())
+        self.protected_ids.deleteable_count()
     }
 
     /// Check if an ID is protected (GT)
     #[inline]
     pub fn is_protected(&self, id: u64) -> bool {
-        self.gt_bitmap.exists(id)
+        self.protected_ids.is_protected(id)
     }
 }
 
 impl WorkloadContext for ProtectedDeleteContext {
     fn claim_next_id(&self) -> Option<u64> {
-        // Check request limit first
+        // Check if we've hit the request limit
         if let Some(limit) = self.request_limit {
-            let claimed = self.requests_claimed.fetch_add(1, Ordering::Relaxed);
-            if claimed >= limit {
+            if self.protected_ids.claimed_count() >= limit {
                 return None;
             }
         }
 
-        // The magic: unset_only() skips all GT IDs automatically!
-        let iter = self.gt_bitmap.iter().unset_only();
-
-        match &self.strategy {
-            IterationStrategy::Sequential => {
-                iter.continue_write().next().map(|(id, _)| id)
-            }
-            IterationStrategy::Random { seed } => {
-                iter.seed(*seed).continue_write().next().map(|(id, _)| id)
-            }
-            IterationStrategy::Zipfian { skew, seed } => {
-                iter.distribution(AccessDistribution::Zipfian { skew: *skew })
-                    .seed(*seed)
-                    .continue_write()
-                    .next()
-                    .map(|(id, _)| id)
-            }
-            IterationStrategy::Subset { start, end, inner } => {
-                let base = iter.id_range(*start, *end);
-                match inner.as_ref() {
-                    IterationStrategy::Sequential => base.continue_write().next().map(|(id, _)| id),
-                    IterationStrategy::Random { seed } => {
-                        base.seed(*seed).continue_write().next().map(|(id, _)| id)
-                    }
-                    IterationStrategy::Zipfian { skew, seed } => {
-                        base.distribution(AccessDistribution::Zipfian { skew: *skew })
-                            .seed(*seed)
-                            .continue_write()
-                            .next()
-                            .map(|(id, _)| id)
-                    }
-                    _ => base.continue_write().next().map(|(id, _)| id),
-                }
-            }
-        }
+        // Use shared cursor from ProtectedIds
+        self.protected_ids.claim_deleteable_id()
     }
 
     fn next_dataset_idx(&self) -> Option<u64> {
@@ -1446,19 +1317,17 @@ impl WorkloadContext for ProtectedDeleteContext {
     }
 
     fn get_vector_bytes(&self, _idx: u64) -> Option<&[u8]> {
-        None // Delete doesn't need vector bytes
+        None
     }
 
-    fn compute_and_record_recall(&mut self, _query_idx: u64, _response: &RespValue) {
-        // No-op for delete workloads
-    }
+    fn compute_and_record_recall(&mut self, _query_idx: u64, _response: &RespValue) {}
 
     fn take_metrics(&mut self) -> WorkloadMetrics {
         WorkloadMetrics::None
     }
 
     fn num_items(&self) -> u64 {
-        self.dataset.num_vectors()
+        self.max_id
     }
 
     fn num_queries(&self) -> u64 {
@@ -1466,11 +1335,125 @@ impl WorkloadContext for ProtectedDeleteContext {
     }
 
     fn uses_dataset_keys(&self) -> bool {
-        true // Key is the vector ID to delete
+        true
     }
 
     fn key_is_claimed_id(&self) -> bool {
-        true // Key is directly the claimed ID (vector ID to delete)
+        true
+    }
+}
+
+// =============================================================================
+// GtLoadContext - For VecGtLoad (load only ground truth vectors)
+// =============================================================================
+
+/// Context for loading only ground truth vectors
+///
+/// Iterates through GT IDs from ProtectedIds using a shared atomic cursor.
+/// Used to populate a minimal dataset containing just the vectors needed for recall.
+pub struct GtLoadContext {
+    dataset: Arc<DatasetContext>,
+    /// Shared ProtectedIds containing GT vector IDs
+    protected_ids: Arc<ProtectedIds>,
+    /// Atomic cursor for iterating GT IDs
+    cursor: AtomicU64,
+    /// Cached sorted GT IDs for iteration
+    gt_ids: Vec<u64>,
+    tag_distributions: Option<TagDistributionSet>,
+    numeric_fields: NumericFieldSet,
+}
+
+impl GtLoadContext {
+    pub fn new(
+        dataset: Arc<DatasetContext>,
+        protected_ids: Arc<ProtectedIds>,
+        tag_distributions: Option<TagDistributionSet>,
+        numeric_fields: NumericFieldSet,
+    ) -> Self {
+        // Collect GT IDs into a sorted vector for iteration
+        let gt_ids: Vec<u64> = protected_ids.reference_set().iter().collect();
+        
+        Self {
+            dataset,
+            protected_ids,
+            cursor: AtomicU64::new(0),
+            gt_ids,
+            tag_distributions,
+            numeric_fields,
+        }
+    }
+
+    /// Get count of GT vectors to load
+    pub fn gt_count(&self) -> usize {
+        self.gt_ids.len()
+    }
+}
+
+impl WorkloadContext for GtLoadContext {
+    fn claim_next_id(&self) -> Option<u64> {
+        let idx = self.cursor.fetch_add(1, Ordering::Relaxed) as usize;
+        if idx < self.gt_ids.len() {
+            Some(self.gt_ids[idx])
+        } else {
+            None
+        }
+    }
+
+    fn next_dataset_idx(&self) -> Option<u64> {
+        self.claim_next_id()
+    }
+
+    fn get_query_bytes(&self, _idx: u64) -> Option<&[u8]> {
+        None
+    }
+
+    fn get_vector_bytes(&self, idx: u64) -> Option<&[u8]> {
+        Some(self.dataset.get_vector_bytes(idx))
+    }
+
+    fn fill_tag_placeholder(&self, key_num: u64, buf: &mut [u8]) {
+        if let Some(ref tag_dist) = self.tag_distributions {
+            if let Some(tags) = tag_dist.select_tags_seeded(key_num) {
+                let tag_bytes = tags.as_bytes();
+                let copy_len = tag_bytes.len().min(buf.len());
+                buf[..copy_len].copy_from_slice(&tag_bytes[..copy_len]);
+                buf[copy_len..].fill(b',');
+            } else {
+                buf.fill(b',');
+            }
+        } else {
+            buf.fill(b',');
+        }
+    }
+
+    fn fill_numeric_field(&self, field_idx: usize, key_num: u64, seq_counter: u64, buf: &mut [u8]) {
+        if let Some(field_config) = self.numeric_fields.get(field_idx) {
+            field_config.fill_buffer(key_num, seq_counter, buf);
+        } else {
+            buf.fill(b'0');
+        }
+    }
+
+    fn compute_and_record_recall(&mut self, _query_idx: u64, _response: &RespValue) {}
+
+    fn take_metrics(&mut self) -> WorkloadMetrics {
+        WorkloadMetrics::None
+    }
+
+    fn num_items(&self) -> u64 {
+        self.gt_ids.len() as u64
+    }
+
+    fn num_queries(&self) -> u64 {
+        0
+    }
+
+    fn uses_dataset_keys(&self) -> bool {
+        true
+    }
+
+    fn key_is_claimed_id(&self) -> bool {
+        false // Key is the GT ID, not a simple claimed counter
     }
 }
 
@@ -1909,6 +1892,15 @@ pub fn create_workload_context_with_iteration(
                 request_limit,
             ))
         }
+        WorkloadType::VecGtLoad => {
+            let ds = dataset.expect("VecGtLoad requires dataset");
+            // Use ProtectedIds which contains GT IDs from dataset
+            if let Some(pids) = protected_ids {
+                Box::new(GtLoadContext::new(ds, pids, tag_distributions, numeric_fields))
+            } else {
+                panic!("VecGtLoad requires dataset with ground truth (protected_ids)")
+            }
+        }
         WorkloadType::VecQuery => {
             let ds = dataset.expect("VecQuery requires dataset");
             Box::new(VectorQueryContext::with_strategy(
@@ -1929,18 +1921,14 @@ pub fn create_workload_context_with_iteration(
         }
         WorkloadType::VecDelProtected => {
             let ds = dataset.expect("VecDelProtected requires dataset");
-            // Create GT bitmap from protected_ids if available
-            if let Some(ref pids) = protected_ids {
-                // Use the ReferenceSet from ProtectedIds to build GT bitmap
-                let gt_ids = pids.reference_set().iter();
-                Box::new(ProtectedDeleteContext::from_gt_ids_with_limit(
-                    ds, gt_ids, strategy, request_limit
-                ))
+            let max_id = ds.num_vectors();
+            // Use shared ProtectedIds (like VecLoad uses shared VectorExistenceMap)
+            if let Some(pids) = protected_ids {
+                Box::new(ProtectedDeleteContext::new(pids, max_id, request_limit))
             } else {
-                // No GT protection - create empty bitmap (all IDs deleteable)
-                Box::new(ProtectedDeleteContext::from_gt_ids_with_limit(
-                    ds, std::iter::empty(), strategy, request_limit
-                ))
+                // No GT protection - create empty ProtectedIds
+                let empty_pids = Arc::new(ProtectedIds::new(std::iter::empty::<u64>(), max_id));
+                Box::new(ProtectedDeleteContext::new(empty_pids, max_id, request_limit))
             }
         }
         WorkloadType::VecUpdate => {

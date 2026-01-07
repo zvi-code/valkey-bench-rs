@@ -150,6 +150,12 @@ pub fn create_template_with_address(
             create_vec_load_template(sc, key_width)
         }
 
+        WorkloadType::VecGtLoad => {
+            let sc = search_config.expect("VecGtLoad requires search config");
+            // Same template as VecLoad - only loads GT vectors
+            create_vec_load_template(sc, key_width)
+        }
+
         WorkloadType::VecQuery => {
             let sc = search_config.expect("VecQuery requires search config");
             create_vec_query_template(sc)
