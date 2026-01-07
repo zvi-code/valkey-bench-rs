@@ -54,7 +54,7 @@ sections:
 
   keys:
     present: false        # Generate keys with pattern
-    pattern: "key:{HASHTAG}:%012d"   # Cluster-aware key pattern
+    pattern: "key:%012d"   # Key pattern
 ```
 
 ### Binary Layout: `string-dataset.bin`
@@ -70,7 +70,7 @@ Record 1: [4-byte len=25]["dummy-test-string-value-2"][padding to 1028 bytes]
 ### Generated Command
 
 ```
-SET key:{ABC}:000000000001 "dummy-test-string-value-1"
+SET key:000000000001 "dummy-test-string-value-1"
 ```
 
 ---
@@ -79,7 +79,7 @@ SET key:{ABC}:000000000001 "dummy-test-string-value-1"
 
 **Data to benchmark:**
 ```
-HSET "vec:{ABC}:000000000001" embedding [0.1, 0.2, 0.3, 0.4]
+HSET "vec:000000000001" embedding [0.1, 0.2, 0.3, 0.4]
 FT.SEARCH idx "*=>[KNN 10 @embedding $BLOB]" PARAMS 2 BLOB <query_vector>
 ```
 
@@ -110,7 +110,7 @@ sections:
 
   keys:
     present: false
-    pattern: "vec:{HASHTAG}:%012d"
+    pattern: "vec:%012d"
 
   queries:
     present: true
@@ -173,8 +173,8 @@ Records section (hex dump, little-endian float32):
 
 **Data to benchmark:**
 ```
-HSET "hash:{ABC}:000000000001" field1 "value1" field2 "value2"
-HSET "hash:{ABC}:000000000002" field1 "value1" field2 "value2"
+HSET "hash:000000000001" field1 "value1" field2 "value2"
+HSET "hash:000000000002" field1 "value1" field2 "value2"
 ```
 
 ### Schema: `hash-dataset.yaml`
@@ -258,8 +258,8 @@ Total: 256 + 64 = 320 bytes
 
 **Data to benchmark:**
 ```
-SADD "set:{ABC}:000000000001" "member1" "member2"
-SADD "set:{ABC}:000000000002" "member1" "member2"
+SADD "set:000000000001" "member1" "member2"
+SADD "set:000000000002" "member1" "member2"
 ```
 
 ### PROBLEM: Variable Members Per Key
@@ -409,8 +409,8 @@ Section: Members (variable)
 
 **Data to benchmark:**
 ```
-RPUSH "list:{ABC}:000000000001" "elem1" "elem2" "elem3"
-RPUSH "list:{ABC}:000000000002" "elem1" "elem2"
+RPUSH "list:000000000001" "elem1" "elem2" "elem3"
+RPUSH "list:000000000002" "elem1" "elem2"
 ```
 
 ### Schema: `list-dataset.yaml`
@@ -441,7 +441,7 @@ sections:
 
   keys:
     present: false
-    pattern: "list:{HASHTAG}:%012d"
+    pattern: "list:%012d"
 ```
 
 ### Binary Layout
@@ -472,8 +472,8 @@ Section: Records
 
 **Data to benchmark:**
 ```
-ZADD "zset:{ABC}:000000000001" 1.5 "member1" 2.5 "member2"
-ZADD "zset:{ABC}:000000000002" 10.0 "member1" 20.0 "member2"
+ZADD "zset:000000000001" 1.5 "member1" 2.5 "member2"
+ZADD "zset:000000000002" 10.0 "member1" 20.0 "member2"
 ```
 
 ### Schema: `zset-dataset.yaml`
@@ -513,7 +513,7 @@ sections:
 
   keys:
     present: false
-    pattern: "zset:{HASHTAG}:%012d"
+    pattern: "zset:%012d"
 ```
 
 ### Binary Layout
@@ -746,10 +746,10 @@ Records section size: 5 * 56 = 280 bytes
 Offset: 0x0118
 Key size: 32 bytes (fixed)
 
-Key 0: "prod:{ABC}:000000000001\0..."
-Key 1: "prod:{ABC}:000000000002\0..."
+Key 0: "prod:000000000001\0..."
+Key 1: "prod:000000000002\0..."
 ...
-Key 4: "prod:{ABC}:000000000005\0..."
+Key 4: "prod:000000000005\0..."
 
 Keys section size: 5 * 32 = 160 bytes
 
@@ -786,7 +786,7 @@ Ground truth size: 2 * 24 = 48 bytes
 # ... more records
 
 # Keys section (offset 0x0118)
-0x0118: 70 72 6F 64 3A 7B 41 42 43 7D 3A 30 30 30 30 30  # "prod:{ABC}:00000"
+0x0118: 70 72 6F 64 3A 30 30 30 30 30 30 30 30 30 30 30  # "prod:00000000000"
 0x0128: 30 30 30 30 30 30 31 00 00 00 00 00 00 00 00 00  # "0000001" + pad
 # ... more keys
 

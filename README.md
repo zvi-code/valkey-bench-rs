@@ -912,7 +912,7 @@ Add numeric fields with configurable distributions. The benchmark automatically 
 
 # Verify data was loaded correctly
 ./valkey-bench-rs --cli -h $HOST KEYS "doc:*" | head -3
-./valkey-bench-rs --cli -h $HOST HMGET doc:{ABC}:000000000001 category price rating
+./valkey-bench-rs --cli -h $HOST HMGET doc:000000000001 category price rating
 ```
 
 **Complete Example with E-commerce Data:**

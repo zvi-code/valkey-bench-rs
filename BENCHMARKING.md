@@ -103,7 +103,7 @@ This creates:
 
 The tool reads from the schema:
 - Vector count (10,000,000)
-- Key pattern (`vec:{HASHTAG}:%012d`)
+- Key pattern (`vec:%012d`)
 - Distance metric (COSINE)
 - Vector dimensions (768)
 

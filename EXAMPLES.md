@@ -527,7 +527,7 @@ The `--address-type` flag enables benchmarking operations across hash fields or 
   -n 30000 -r 10000 -d 64 -c 50
 
 # Result: 10,000 keys, each with 3 fields (30,000 total operations)
-# Verify: HLEN user{ABC}:000000000001 = 3
+# Verify: HLEN user:000000000001 = 3
 
 # Hash with more fields for wide objects
 ./target/release/valkey-bench-rs -h $HOST --cluster \

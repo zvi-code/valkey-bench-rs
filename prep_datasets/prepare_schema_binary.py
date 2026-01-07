@@ -18,7 +18,7 @@ Usage:
         --name my_dataset \\
         --metric cosine \\
         --max-neighbors 100 \\
-        --key-pattern "vec:{HASHTAG}:%012d"
+        --key-pattern "vec:%012d"
 """
 
 import numpy as np
@@ -407,7 +407,7 @@ def convert_hdf5_to_schema(h5_path: Path, output_base: Path,
                            dataset_name: str,
                            distance_metric: str = 'l2',
                            max_ground_truth: int = 100,
-                           key_pattern: str = "vec:{HASHTAG}:%012d"):
+                           key_pattern: str = "vec:%012d"):
     """
     Convert HDF5 vector dataset to schema YAML + binary data.
 
@@ -531,7 +531,7 @@ Examples:
                              help='Distance metric')
     hdf5_parser.add_argument('--max-neighbors', type=int, default=100,
                              help='Max ground truth neighbors')
-    hdf5_parser.add_argument('--key-pattern', default='vec:{HASHTAG}:%012d',
+    hdf5_parser.add_argument('--key-pattern', default='vec:%012d',
                              help='Key generation pattern')
 
     args = parser.parse_args()

@@ -521,7 +521,7 @@ sections:
     count: 60000                        # Number of records
   keys:
     present: true|false                 # Keys stored in binary?
-    pattern: "vec:{HASHTAG}:%012d"      # Key pattern for generated keys
+    pattern: "vec:%012d"                # Key pattern for generated keys
     encoding: utf8
     max_bytes: 32
   queries:
@@ -554,13 +554,12 @@ field_metadata:
 
 Use patterns for automatic key generation:
 
-| Pattern | Description |
-|---------|-------------|
-| `{HASHTAG}` | Random cluster tag (e.g., `{ABC}`) |
-| `%012d` | Zero-padded record ID |
-| `{id}` | Simple ID placeholder |
+| Pattern | Example | Description |
+|---------|---------|-------------|
+| `%012d` | `000000000001` | Zero-padded record ID |
+| `prefix:%06d` | `vec:000001` | Prefix with formatted ID |
 
-Example: `vec:{HASHTAG}:%012d` generates keys like `vec:{ABC}:000000000042`
+Example: `vec:%012d` generates keys like `vec:000000000042`
 
 ### Example Schemas
 
@@ -581,7 +580,7 @@ sections:
     count: 60000
   keys:
     present: false
-    pattern: vec:{HASHTAG}:%012d
+    pattern: vec:%012d
   queries:
     present: true
     count: 10000

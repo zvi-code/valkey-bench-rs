@@ -388,7 +388,7 @@ def convert_hdf5_to_schema(h5_path: Path, output_base: Path,
                             dataset_name: str,
                             distance_metric: str = 'l2',
                             max_ground_truth: int = 100,
-                            key_pattern: str = "vec:{HASHTAG}:%012d"):
+                            key_pattern: str = "vec:%012d"):
     """
     Convert HDF5 vector dataset to schema YAML + binary data.
 
@@ -489,7 +489,7 @@ def main():
     parser.add_argument('--name', help='Dataset name')
     parser.add_argument('--metric', choices=['l2', 'cosine', 'ip'], default='l2')
     parser.add_argument('--max-neighbors', type=int, default=100)
-    parser.add_argument('--key-pattern', default='vec:{HASHTAG}:%012d')
+    parser.add_argument('--key-pattern', default='vec:%012d')
 
     args = parser.parse_args()
 
@@ -972,7 +972,7 @@ impl DatasetContext {
         } else {
             KeyConfig::Generated {
                 pattern: schema.sections.keys.pattern.clone()
-                    .unwrap_or_else(|| "key:{HASHTAG}:%012d".to_string()),
+                    .unwrap_or_else(|| "key:%012d".to_string()),
             }
         };
 
@@ -1058,23 +1058,19 @@ impl DatasetContext {
     }
 
     fn generate_key(&self, pattern: &str, idx: u64) -> String {
-        // Replace {HASHTAG} with a cluster tag based on idx
-        let cluster_tag = format!("{{{}}}", Self::compute_cluster_tag(idx));
-        let with_tag = pattern.replace("{HASHTAG}", &cluster_tag);
-
-        // Replace %012d style format
-        if let Some(pos) = with_tag.find('%') {
-            let end = with_tag[pos..].find('d').map(|p| pos + p + 1).unwrap_or(with_tag.len());
-            let format_spec = &with_tag[pos..end];
+        // Replace %012d style format with the index
+        if let Some(pos) = pattern.find('%') {
+            let end = pattern[pos..].find('d').map(|p| pos + p + 1).unwrap_or(pattern.len());
+            let format_spec = &pattern[pos..end];
             // Parse width from %0Nd
             let width: usize = format_spec[1..format_spec.len()-1]
                 .trim_start_matches('0')
                 .parse()
                 .unwrap_or(12);
             let formatted = format!("{:0width$}", idx, width = width);
-            format!("{}{}{}", &with_tag[..pos], formatted, &with_tag[end..])
+            format!("{}{}{}", &pattern[..pos], formatted, &pattern[end..])
         } else {
-            with_tag
+            pattern.to_string()
         }
     }
 

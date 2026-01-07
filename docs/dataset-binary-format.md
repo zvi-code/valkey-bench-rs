@@ -169,7 +169,7 @@ sections:
     count: 3
   keys:
     present: false
-    pattern: "str:{HASHTAG}:%012d"
+    pattern: "str:%012d"
 ```
 
 **Layout Computation:**
@@ -273,17 +273,17 @@ Record 2 (offset 0x0020): embedding = [0.1, 0.2, 0.3, 0.4]
 0x0020  | CD CC CC 3D CD CC 4C 3E 9A 99 99 3E CD CC CC 3E |
 
 === SECTION: Keys (offset 0x0030, 72 bytes) ===
-Key 0 (offset 0x0030): "vec:{ABC}:000000000001"
-0x0030  | 76 65 63 3A 7B 41 42 43 7D 3A 30 30 30 30 30 30 | vec:{ABC}:000000
-0x0040  | 30 30 30 30 30 31 00 00                         | 000001..
+Key 0 (offset 0x0030): "vec:000000000001"
+0x0030  | 76 65 63 3A 30 30 30 30 30 30 30 30 30 30 30 31 | vec:000000000001
+0x0040  | 00 00 00 00 00 00 00 00                         | ........
 
-Key 1 (offset 0x0048): "vec:{ABC}:000000000002"
-0x0048  | 76 65 63 3A 7B 41 42 43 7D 3A 30 30 30 30 30 30 | vec:{ABC}:000000
-0x0058  | 30 30 30 30 30 32 00 00                         | 000002..
+Key 1 (offset 0x0048): "vec:000000000002"
+0x0048  | 76 65 63 3A 30 30 30 30 30 30 30 30 30 30 30 32 | vec:000000000002
+0x0058  | 00 00 00 00 00 00 00 00                         | ........
 
-Key 2 (offset 0x0060): "vec:{ABC}:000000000003"
-0x0060  | 76 65 63 3A 7B 41 42 43 7D 3A 30 30 30 30 30 30 | vec:{ABC}:000000
-0x0070  | 30 30 30 30 30 33 00 00                         | 000003..
+Key 2 (offset 0x0060): "vec:000000000003"
+0x0060  | 76 65 63 3A 30 30 30 30 30 30 30 30 30 30 30 33 | vec:000000000003
+0x0070  | 00 00 00 00 00 00 00 00                         | ........
 
 === SECTION: Queries (offset 0x0078, 32 bytes) ===
 Query 0 (offset 0x0078): [1.5, 2.5, 3.5, 4.5]
@@ -627,7 +627,7 @@ sections:
     count: 2
   keys:
     present: false
-    pattern: "zset:{HASHTAG}:%06d"
+    pattern: "zset:%06d"
 ```
 
 **Layout Computation:**

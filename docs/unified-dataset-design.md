@@ -357,7 +357,7 @@ pub enum KeyConfig {
     },
     /// Keys are generated with a pattern
     Generated {
-        pattern: String,  // e.g., "vec:{HASHTAG}:%012d"
+        pattern: String,  // e.g., "vec:%012d"
     },
 }
 

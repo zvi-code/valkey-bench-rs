@@ -530,7 +530,7 @@ sections:
     count: 1000
   keys:
     present: false
-    pattern: "vec:{HASHTAG}:%012d"
+    pattern: "vec:%012d"
   queries:
     present: true
     count: 100
