@@ -158,15 +158,13 @@ impl BenchmarkResult {
             );
         }
 
-        // Show keyspace stats only if there was activity
-        if self.keyspace_stats.has_data() {
-            println!(
-                "Keyspace: hits={} misses={} hit-rate={:.1}%",
-                format_count(self.keyspace_stats.hits),
-                format_count(self.keyspace_stats.misses),
-                self.keyspace_stats.hit_rate() * 100.0
-            );
-        }
+        // Show keyspace stats always (for writes, hit=overwrite, miss=new key)
+        println!(
+            "Keyspace: hits={} misses={} hit-rate={:.1}%",
+            format_count(self.keyspace_stats.hits),
+            format_count(self.keyspace_stats.misses),
+            self.keyspace_stats.hit_rate() * 100.0
+        );
     }
 }
 

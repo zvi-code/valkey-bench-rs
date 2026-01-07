@@ -715,10 +715,8 @@ fn run() -> Result<()> {
                 summary_parts.push(format!("recall={:.4}", result.recall_stats.average()));
             }
 
-            // Hit rate (if applicable)
-            if result.keyspace_stats.has_data() {
-                summary_parts.push(format!("hit-rate={:.1}%", result.keyspace_stats.hit_rate() * 100.0));
-            }
+            // Hit rate (always show)
+            summary_parts.push(format!("hit-rate={:.1}%", result.keyspace_stats.hit_rate() * 100.0));
 
             // Errors (if any)
             if result.error_count > 0 {
