@@ -570,12 +570,17 @@ impl WorkloadContext for VectorLoadContext {
     fn claim_next_id(&self) -> Option<u64> {
         // For VecLoad, use existence_map to skip existing vectors if available
         if let Some(ref em) = self.existence_map {
-            // Limit claims to min(request_limit, dataset_size) to respect -n flag
-            let max_id = self.request_limit
-                .map(|limit| limit.min(self.dataset.num_vectors()))
-                .unwrap_or(self.dataset.num_vectors());
+            // Get offset and count from dataset
+            let offset = self.dataset.effective_offset();
+            let num_vectors = self.dataset.num_vectors();
             
-            em.claim_unmapped_id(max_id)
+            // Limit claims to min(request_limit, dataset_size) to respect -n flag
+            let count = self.request_limit
+                .map(|limit| limit.min(num_vectors))
+                .unwrap_or(num_vectors);
+            
+            // Claim in range [offset, offset + count)
+            em.claim_unmapped_id_in_range(offset, offset + count)
         } else {
             // Use tracker-based iteration based on strategy
             // Iterator exhaustion signals completion - no wrap-around
@@ -1256,25 +1261,27 @@ impl WorkloadContext for VectorDeleteContext {
 ///
 /// Uses shared ProtectedIds (like VecLoad uses shared VectorExistenceMap).
 /// All workers share the same atomic cursor via Arc<ProtectedIds>.
+/// Respects dataset offset and num_vectors like other contexts.
 pub struct ProtectedDeleteContext {
+    /// Dataset for offset/range info
+    dataset: Arc<DatasetContext>,
     /// Shared protected IDs with atomic cursor
     protected_ids: Arc<ProtectedIds>,
-    /// Max ID (num_vectors)
-    max_id: u64,
     /// Request limit (total across all workers)
     request_limit: Option<u64>,
-    /// Requests claimed counter (shared would need Arc, but limit check is per-invocation)
-    requests_claimed: AtomicU64,
 }
 
 impl ProtectedDeleteContext {
-    /// Create with shared ProtectedIds
-    pub fn new(protected_ids: Arc<ProtectedIds>, max_id: u64, request_limit: Option<u64>) -> Self {
+    /// Create with shared ProtectedIds and dataset
+    pub fn new(
+        dataset: Arc<DatasetContext>,
+        protected_ids: Arc<ProtectedIds>,
+        request_limit: Option<u64>,
+    ) -> Self {
         Self {
+            dataset,
             protected_ids,
-            max_id,
             request_limit,
-            requests_claimed: AtomicU64::new(0),
         }
     }
 
@@ -1304,8 +1311,12 @@ impl WorkloadContext for ProtectedDeleteContext {
             }
         }
 
-        // Use shared cursor from ProtectedIds
-        self.protected_ids.claim_deleteable_id()
+        // Use dataset offset and num_vectors like other contexts
+        let offset = self.dataset.effective_offset();
+        let num_vectors = self.dataset.num_vectors();
+        
+        // Claim in range [offset, offset + num_vectors)
+        self.protected_ids.claim_deleteable_id_in_range(offset, offset + num_vectors)
     }
 
     fn next_dataset_idx(&self) -> Option<u64> {
@@ -1327,7 +1338,7 @@ impl WorkloadContext for ProtectedDeleteContext {
     }
 
     fn num_items(&self) -> u64 {
-        self.max_id
+        self.dataset.num_vectors()
     }
 
     fn num_queries(&self) -> u64 {
@@ -1921,14 +1932,15 @@ pub fn create_workload_context_with_iteration(
         }
         WorkloadType::VecDelProtected => {
             let ds = dataset.expect("VecDelProtected requires dataset");
-            let max_id = ds.num_vectors();
             // Use shared ProtectedIds (like VecLoad uses shared VectorExistenceMap)
+            // The dataset's offset and num_vectors are used in claim_next_id
             if let Some(pids) = protected_ids {
-                Box::new(ProtectedDeleteContext::new(pids, max_id, request_limit))
+                Box::new(ProtectedDeleteContext::new(ds, pids, request_limit))
             } else {
-                // No GT protection - create empty ProtectedIds
+                // No GT protection - create empty ProtectedIds with max possible range
+                let max_id = ds.effective_offset() + ds.num_vectors();
                 let empty_pids = Arc::new(ProtectedIds::new(std::iter::empty::<u64>(), max_id));
-                Box::new(ProtectedDeleteContext::new(empty_pids, max_id, request_limit))
+                Box::new(ProtectedDeleteContext::new(ds, empty_pids, request_limit))
             }
         }
         WorkloadType::VecUpdate => {

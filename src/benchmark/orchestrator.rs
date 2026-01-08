@@ -592,11 +592,12 @@ impl Orchestrator {
             }
         };
 
-        // Get capacity from dataset if available
+        // Get capacity from dataset: offset + count to cover full ID range
+        // This ensures we can track IDs from 0 to (offset + num_vectors - 1)
         let capacity = self
             .dataset
             .as_ref()
-            .map(|ds| ds.num_vectors())
+            .map(|ds| ds.effective_offset() + ds.num_vectors())
             .unwrap_or(1_000_000);
 
         let is_cluster = self.cluster_topology.is_some();
@@ -777,22 +778,25 @@ impl Orchestrator {
             if let Some(ref existence_map) = self.existence_map {
                 existence_map.reset_unmapped_counter();
 
-                // Calculate vectors to actually load (skip existing)
-                let already_mapped = existence_map.count();
+                // Calculate vectors to actually load (skip existing in target range)
+                let offset = self.dataset.as_ref().map(|ds| ds.effective_offset()).unwrap_or(0);
                 let dataset_size = self.dataset.as_ref().map(|ds| ds.num_vectors()).unwrap_or(0);
                 let requested = self.effective_requests().min(dataset_size);
-                let to_load = requested.saturating_sub(already_mapped);
+                
+                // Count only vectors that exist in the target range [offset, offset+requested)
+                let already_in_range = existence_map.count_in_range(offset, requested);
+                let to_load = requested.saturating_sub(already_in_range);
 
-                if already_mapped > 0 && !self.config.quiet {
+                if already_in_range > 0 && !self.config.quiet {
                     info!(
-                        "Partial prefill: {} vectors already exist, {} to load (of {} requested)",
-                        already_mapped, to_load, requested
+                        "Partial prefill: {} vectors already exist in range [{}, {}), {} to load",
+                        already_in_range, offset, offset + requested, to_load
                     );
                 }
 
                 if to_load == 0 {
                     if !self.config.quiet {
-                        info!("All {} vectors already loaded, nothing to do", already_mapped);
+                        info!("All {} vectors in range already loaded, nothing to do", already_in_range);
                     }
                     // Return early with empty result
                     return Ok(BenchmarkResult {

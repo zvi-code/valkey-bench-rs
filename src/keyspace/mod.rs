@@ -133,23 +133,38 @@ impl VectorExistenceMap {
         self.capacity as usize
     }
 
-    /// Claim the next unmapped vector ID (for partial prefill)
+    /// Count how many IDs in a range already exist
     ///
-    /// Atomically finds and claims the next vector ID that doesn't exist.
-    /// Returns None when all vectors up to max_id have been processed.
+    /// Returns the count of existing IDs in [start, start+count)
+    pub fn count_in_range(&self, start: u64, count: u64) -> u64 {
+        let mut existing = 0;
+        let end = start + count;
+        for id in start..end.min(self.capacity) {
+            if self.tracker.exists(id) {
+                existing += 1;
+            }
+        }
+        existing
+    }
+
+    /// Claim the next unmapped vector ID in a range (for partial prefill)
+    ///
+    /// Atomically finds and claims the next vector ID that doesn't exist
+    /// in the range [start_id, max_id).
+    /// Returns None when all vectors in range have been processed.
     ///
     /// This method uses the tracker's continue_write iterator for atomic claim semantics,
     /// ensuring no two threads can claim the same ID even under high concurrency.
     /// continue_write() preserves the cursor position across calls.
-    pub fn claim_unmapped_id(&self, max_id: u64) -> Option<u64> {
+    pub fn claim_unmapped_id_in_range(&self, start_id: u64, max_id: u64) -> Option<u64> {
         let effective_max = max_id.min(self.capacity);
 
         // Use tracker's continue_write iterator for atomic claim
         // continue_write() doesn't reset cursor - allows multi-threaded claiming
         // The iterator finds unset bits and atomically sets them
-        let mut write_iter = self.tracker.iter().unset_only().continue_write();
+        let mut write_iter = self.tracker.iter().id_range(start_id, effective_max).unset_only().continue_write();
         while let Some((id, _)) = write_iter.next() {
-            if id < effective_max {
+            if id >= start_id && id < effective_max {
                 // Write iterator already marks the ID as set atomically
                 return Some(id);
             }
@@ -157,8 +172,15 @@ impl VectorExistenceMap {
             break;
         }
 
-        // Iterator exhausted - all IDs up to effective_max have been claimed
+        // Iterator exhausted - all IDs in range have been claimed
         None
+    }
+
+    /// Claim the next unmapped vector ID (for partial prefill)
+    ///
+    /// Equivalent to claim_unmapped_id_in_range(0, max_id)
+    pub fn claim_unmapped_id(&self, max_id: u64) -> Option<u64> {
+        self.claim_unmapped_id_in_range(0, max_id)
     }
 
     /// Reset the unmapped counter
@@ -212,7 +234,7 @@ pub struct ProtectedIds {
     claimed_count: AtomicU64,
     /// Atomic counter for GT load iteration
     gt_load_counter: AtomicU64,
-    /// Maximum vector ID
+    /// Maximum vector ID (exclusive end of range)
     max_id: u64,
 }
 
@@ -240,13 +262,19 @@ impl ProtectedIds {
         self.reference_set.contains(id)
     }
 
-    /// Claim the next deleteable (non-protected) vector ID
+    /// Claim the next deleteable (non-protected) vector ID in a range
     ///
-    /// Returns None when all deleteable vectors have been claimed.
-    pub fn claim_deleteable_id(&self) -> Option<u64> {
+    /// Returns None when all deleteable vectors in [start_id, max_id) have been claimed.
+    pub fn claim_deleteable_id_in_range(&self, start_id: u64, max_id: u64) -> Option<u64> {
         loop {
             let candidate = self.delete_counter.fetch_add(1, Ordering::Relaxed);
-            if candidate >= self.max_id {
+            
+            // Skip IDs below start_id (counter may have been reset or started at 0)
+            if candidate < start_id {
+                continue;
+            }
+            
+            if candidate >= max_id {
                 return None;
             }
             if !self.reference_set.contains(candidate) {
@@ -254,6 +282,14 @@ impl ProtectedIds {
                 return Some(candidate);
             }
         }
+    }
+
+    /// Claim the next deleteable (non-protected) vector ID
+    ///
+    /// Returns None when all deleteable vectors have been claimed.
+    /// Uses the range [0, max_id).
+    pub fn claim_deleteable_id(&self) -> Option<u64> {
+        self.claim_deleteable_id_in_range(0, self.max_id)
     }
 
     /// Get count of claimed deleteable IDs
