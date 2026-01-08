@@ -109,6 +109,10 @@ pub struct BenchmarkResult {
     pub node_metrics: Vec<crate::metrics::node_metrics::NodeMetricsSnapshot>,
     /// Keyspace hit/miss statistics
     pub keyspace_stats: KeyspaceStats,
+    /// Memory used after benchmark (bytes)
+    pub used_memory_bytes: u64,
+    /// Number of keys in database after benchmark
+    pub dbsize: u64,
 }
 
 impl BenchmarkResult {
@@ -165,6 +169,15 @@ impl BenchmarkResult {
             format_count(self.keyspace_stats.misses),
             self.keyspace_stats.hit_rate() * 100.0
         );
+
+        // Show memory and key count
+        if self.used_memory_bytes > 0 || self.dbsize > 0 {
+            println!(
+                "Database: keys={} memory={}",
+                format_count(self.dbsize),
+                format_memory(self.used_memory_bytes)
+            );
+        }
     }
 }
 
@@ -575,6 +588,29 @@ impl Orchestrator {
         KeyspaceStats { hits, misses }
     }
 
+    /// Extract used memory (in bytes) from a snapshot
+    fn used_memory_from_snapshot(snapshot: &ClusterSnapshot) -> u64 {
+        snapshot.get_value("used_memory").unwrap_or(0) as u64
+    }
+
+    /// Get DBSIZE from cluster (sum across all primaries)
+    fn capture_dbsize(&self) -> u64 {
+        use crate::client::ControlPlaneExt;
+        
+        let addresses = self.get_benchmark_addresses();
+        let mut total_keys: u64 = 0;
+        
+        for (host, port) in &addresses {
+            if let Ok(mut conn) = self.connection_factory.create(host, *port) {
+                if let Ok(size) = conn.dbsize() {
+                    total_keys += size as u64;
+                }
+            }
+        }
+        
+        total_keys
+    }
+
     /// Build vector existence map by scanning cluster for existing vector keys
     ///
     /// This is used for vec-query with existing data to:
@@ -768,6 +804,8 @@ impl Orchestrator {
             error_count,
             node_metrics: Vec::new(),
             keyspace_stats: KeyspaceStats::default(),
+            used_memory_bytes: 0,
+            dbsize: 0,
         })
     }
 
@@ -810,6 +848,8 @@ impl Orchestrator {
                         error_count: 0,
                         node_metrics: Vec::new(),
                         keyspace_stats: KeyspaceStats::default(),
+                        used_memory_bytes: 0,
+                        dbsize: 0,
                     });
                 }
 
@@ -1090,6 +1130,10 @@ impl Orchestrator {
             hits: stats_after.hits.saturating_sub(stats_before.hits),
             misses: stats_after.misses.saturating_sub(stats_before.misses),
         };
+        
+        // Get memory and dbsize after benchmark
+        result.used_memory_bytes = Self::used_memory_from_snapshot(&snapshot_after);
+        result.dbsize = self.capture_dbsize();
 
         // Display per-node statistics matrix (if not quiet and cluster mode)
         if !self.config.quiet && self.cluster_topology.is_some() {
@@ -1341,6 +1385,10 @@ impl Orchestrator {
         // Calculate keyspace stats delta
         let stats_before = Self::keyspace_stats_from_snapshot(&snapshot_before);
         let stats_after = Self::keyspace_stats_from_snapshot(&snapshot_after);
+        
+        // Get memory and dbsize after benchmark
+        let used_memory_bytes = Self::used_memory_from_snapshot(&snapshot_after);
+        let dbsize = self.capture_dbsize();
 
         // Build result
         let result = BenchmarkResult {
@@ -1356,6 +1404,8 @@ impl Orchestrator {
                 hits: stats_after.hits.saturating_sub(stats_before.hits),
                 misses: stats_after.misses.saturating_sub(stats_before.misses),
             },
+            used_memory_bytes,
+            dbsize,
         };
 
         // Display per-node statistics matrix
@@ -1755,6 +1805,11 @@ pub fn format_count(value: u64) -> String {
     result
 }
 
+/// Format memory size in human-readable units (K, M, G, T)
+pub fn format_memory(bytes: u64) -> String {
+    crate::metrics::info_fields::format_memory_human(bytes as i64)
+}
+
 /// Detect engine type from INFO SEARCH response
 fn detect_engine_type(conn: &mut crate::client::RawConnection) -> EngineType {
     use crate::utils::{RespEncoder, RespValue};
@@ -1798,6 +1853,8 @@ mod tests {
             error_count: 0,
             node_metrics: Vec::new(),
             keyspace_stats: KeyspaceStats::default(),
+            used_memory_bytes: 0,
+            dbsize: 0,
         };
 
         // p50 should be around 1ms

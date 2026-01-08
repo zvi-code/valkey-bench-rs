@@ -1513,6 +1513,8 @@ mod tests {
             error_count: 0,
             node_metrics: Vec::new(),
             keyspace_stats: crate::benchmark::KeyspaceStats::default(),
+            used_memory_bytes: 0,
+            dbsize: 0,
         }
     }
 
