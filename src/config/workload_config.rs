@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use super::cli::ReadFromReplica;
 use super::search_config::SearchConfig;
 use crate::workload::command_template::CommandTemplate;
-use crate::workload::template_factory::{create_template, AddressConfig};
-use crate::workload::WorkloadType;
+use crate::workload::template_factory::create_template;
+use crate::workload::{AddressSpec, WorkloadType};
 
 /// Configuration for a single workload component
 ///
@@ -152,34 +152,31 @@ impl WorkloadConfig {
     /// Create a command template from this workload config
     ///
     /// Uses this config's settings (workload_type, key_prefix, data_size, search_config)
-    /// to create an appropriate command template. The `cluster_mode` parameter is
-    /// passed separately since it's an infrastructure setting, not per-workload.
-    pub fn build_template(&self, cluster_mode: bool) -> CommandTemplate {
+    /// to create an appropriate command template.
+    pub fn build_template(&self) -> CommandTemplate {
         create_template(
             self.workload_type,
             self.effective_key_prefix(),
             self.data_size,
             self.search_config.as_ref(),
-            cluster_mode,
+            None,
         )
     }
 
-    /// Create a command template with address configuration
+    /// Create a command template with address specification
     ///
-    /// This variant allows specifying an AddressConfig to enable hash field
-    /// or JSON path iteration.
+    /// This variant allows specifying an AddressSpec to enable hash field
+    /// or JSON path iteration with custom key ranges.
     pub fn build_template_with_address(
         &self,
-        cluster_mode: bool,
-        address_config: Option<&AddressConfig>,
+        address_spec: Option<&AddressSpec>,
     ) -> CommandTemplate {
-        crate::workload::template_factory::create_template_with_address(
+        create_template(
             self.workload_type,
             self.effective_key_prefix(),
             self.data_size,
             self.search_config.as_ref(),
-            cluster_mode,
-            address_config,
+            address_spec,
         )
     }
 }
@@ -242,12 +239,8 @@ mod tests {
         // Test that build_template creates template with config's settings
         let config = WorkloadConfig::new(WorkloadType::Get).with_key_prefix("user:");
 
-        let template = config.build_template(false);
+        let template = config.build_template();
         assert_eq!(template.name(), "GET");
-
-        // Test with cluster mode
-        let cluster_template = config.build_template(true);
-        assert_eq!(cluster_template.name(), "GET");
     }
 
     #[test]
@@ -256,8 +249,8 @@ mod tests {
         let config_small = WorkloadConfig::new(WorkloadType::Set).with_data_size(10);
         let config_large = WorkloadConfig::new(WorkloadType::Set).with_data_size(1000);
 
-        let template_small = config_small.build_template(false);
-        let template_large = config_large.build_template(false);
+        let template_small = config_small.build_template();
+        let template_large = config_large.build_template();
 
         // Both should be SET commands
         assert_eq!(template_small.name(), "SET");

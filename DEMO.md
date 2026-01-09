@@ -643,7 +643,7 @@ This demonstrates realistic churn: delete 50% of vectors, query, refill, repeat.
 ./target/release/valkey-bench-rs -h $HOST --cluster \
   --schema datasets/cohere-medium-1m.yaml \
   --data datasets/cohere-medium-1m.bin \
-  -t vec-del-protected -n 500000 \
+  -t vec-del -n 500000 \
   --search-index cohere-1m \
   --search-prefix "vec:" \
   -c 100 --threads 8
@@ -689,7 +689,7 @@ This demonstrates realistic churn: delete 50% of vectors, query, refill, repeat.
 ./target/release/valkey-bench-rs -h $HOST --cluster \
   --schema datasets/cohere-medium-1m.yaml \
   --data datasets/cohere-medium-1m.bin \
-  -t vec-del-protected -n 500000 \
+  -t vec-del -n 500000 \
   --search-index cohere-1m \
   --search-prefix "vec:" \
   -c 100 --threads 8

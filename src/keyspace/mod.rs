@@ -20,7 +20,7 @@ use keyspace_tracker::{PrefixTracker, ReferenceSet, TrackerConfig};
 use crate::client::{ControlPlane, RawConnection};
 use crate::cluster::ClusterNode;
 use crate::utils::{RespEncoder, RespValue};
-use crate::workload::key_format::{KeyFormat, DEFAULT_KEY_WIDTH};
+use crate::workload::addressable::{AddressSpec, DEFAULT_KEY_WIDTH};
 
 // Re-export keyspace_tracker types for direct use
 pub use keyspace_tracker::{
@@ -779,11 +779,11 @@ pub struct ClusterScanResults {
 
 /// Extract vector ID from a key
 ///
-/// Uses the unified key format from workload::key_format module.
-/// Key format: `prefix + vector_id`
+/// Uses AddressSpec for unified key parsing.
+/// Key format: `prefix + vector_id` (supports legacy cluster tags)
 pub fn parse_vector_key(key: &str, prefix: &str) -> Option<(u64, String)> {
-    let format = KeyFormat::new(prefix, DEFAULT_KEY_WIDTH);
-    let (vector_id, _tag_opt) = format.parse_key(key)?;
+    let spec = AddressSpec::with_width(prefix, DEFAULT_KEY_WIDTH, u64::MAX);
+    let vector_id = spec.parse_key(key)?;
     Some((vector_id, String::new()))
 }
 

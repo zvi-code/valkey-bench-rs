@@ -161,7 +161,7 @@ run_host_benchmark() {
             echo "[$host_label] Step $step: Deleting ${DELETE_COUNT} vectors from ${range_label}..."
             output=$($BENCH -h "$host" $cluster_flag \
                 --schema "$SCHEMA" --data "$DATA" \
-                -t vec-del-protected -n $DELETE_COUNT \
+                -t vec-del -n $DELETE_COUNT \
                 --vector-offset $current_offset \
                 --num-vectors $INCREMENT \
                 --search-index "$INDEX" \
@@ -169,7 +169,7 @@ run_host_benchmark() {
                 -c 100 --threads 8 2>&1)
             echo "$output"
             metrics=$(extract_metrics "$output")
-            echo "${step}|delete|vec-del-protected|${range_label}(${DELETE_PERCENT}%)|$metrics" >> "$results_file"
+            echo "${step}|delete|vec-del|${range_label}(${DELETE_PERCENT}%)|$metrics" >> "$results_file"
             echo "[$host_label] Deleted ${DELETE_COUNT} from ${range_label}"
             step=$((step + 1))
         fi
@@ -200,8 +200,8 @@ generate_comparison_table() {
     echo "" >> "$output_file"
     echo "## Configuration" >> "$output_file"
     echo "" >> "$output_file"
-    echo "- **H1 Host:** \`$H1HOST\` (cluster mode)" >> "$output_file"
-    echo "- **H2 Host:** \`$H2HOST\` (standalone)" >> "$output_file"
+    echo "- **H1 Host:** \`$H1HOST\` " >> "$output_file"
+    echo "- **H2 Host:** \`$H2HOST\` " >> "$output_file"
     echo "- **Dataset:** \`$DATASET\`" >> "$output_file"
     echo "- **Index:** \`$INDEX\`" >> "$output_file"
     echo "- **Increment Size:** $INCREMENT vectors" >> "$output_file"

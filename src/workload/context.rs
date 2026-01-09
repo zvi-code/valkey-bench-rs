@@ -816,7 +816,7 @@ impl WorkloadContext for VectorQueryContext {
 /// This context extends VectorQueryContext with the ability to compute recall
 /// while accounting for deleted ground truth vectors. It supports two modes:
 ///
-/// - **Protected Mode**: Ground truth vectors are never deleted (use with VectorDeleteContext
+/// - **Protected Mode**: Ground truth vectors are never deleted (use with DeleteContext
 ///   that has protected_ids). Recall computation is standard.
 ///
 /// - **Adjusted Mode**: Ground truth vectors may be deleted. Recall is computed against
@@ -833,7 +833,7 @@ impl WorkloadContext for VectorQueryContext {
 /// // ... populate from scan ...
 ///
 /// // 3. Run deletions (with or without GT protection)
-/// // ... VectorDeleteContext runs ...
+/// // ... DeleteContext runs ...
 ///
 /// // 4. Create query context with GT-aware recall
 /// let query_ctx = VectorQueryWithDeletesContext::new(
@@ -1081,180 +1081,7 @@ impl WorkloadContext for VectorQueryWithDeletesContext {
 }
 
 // =============================================================================
-// VectorDeleteContext - For VecDelete with ground truth protection
-// =============================================================================
-
-/// Context for vector deletion workloads (DEL) with ground truth protection
-///
-/// Uses tracker-based iteration:
-/// - With `existence_map + protected_ids`: Only returns existing, non-protected IDs
-/// - With `protected_ids` only: Claims deleteable IDs from protected set
-/// - Without protection: Strategy-based iteration through dataset
-pub struct VectorDeleteContext {
-    dataset: Arc<DatasetContext>,
-    protected_ids: Option<Arc<ProtectedIds>>,
-    /// Optional existence map for deleting only existing vectors
-    existence_map: Option<Arc<VectorExistenceMap>>,
-    /// Tracker for iteration when no protection is provided (prefix: "vec:<dataset-name>:")
-    tracker: Arc<PrefixTracker>,
-    /// Iteration strategy
-    strategy: IterationStrategy,
-}
-
-impl VectorDeleteContext {
-    pub fn new(dataset: Arc<DatasetContext>, protected_ids: Option<Arc<ProtectedIds>>) -> Self {
-        // Create tracker with dataset-aware prefix
-        let prefix = format!("vec:{}:", dataset.name());
-        let num_vectors = dataset.num_vectors();
-        let config = TrackerConfig::simple(&prefix)
-            .with_max_id(num_vectors)
-            .with_initial_capacity(num_vectors as usize);
-        let tracker = Arc::new(PrefixTracker::new(config));
-        
-        Self {
-            dataset,
-            protected_ids,
-            existence_map: None,
-            tracker,
-            strategy: IterationStrategy::Sequential,
-        }
-    }
-
-    /// Create with existence map for existence-aware deletion
-    pub fn with_existence_map(
-        dataset: Arc<DatasetContext>,
-        protected_ids: Option<Arc<ProtectedIds>>,
-        existence_map: Option<Arc<VectorExistenceMap>>,
-    ) -> Self {
-        let prefix = format!("vec:{}:", dataset.name());
-        let num_vectors = dataset.num_vectors();
-        let config = TrackerConfig::simple(&prefix)
-            .with_max_id(num_vectors)
-            .with_initial_capacity(num_vectors as usize);
-        let tracker = Arc::new(PrefixTracker::new(config));
-        
-        Self {
-            dataset,
-            protected_ids,
-            existence_map,
-            tracker,
-            strategy: IterationStrategy::Sequential,
-        }
-    }
-
-    /// Create with strategy
-    pub fn with_strategy(
-        dataset: Arc<DatasetContext>,
-        protected_ids: Option<Arc<ProtectedIds>>,
-        existence_map: Option<Arc<VectorExistenceMap>>,
-        strategy: IterationStrategy,
-    ) -> Self {
-        let prefix = format!("vec:{}:", dataset.name());
-        let num_vectors = dataset.num_vectors();
-        let config = TrackerConfig::simple(&prefix)
-            .with_max_id(num_vectors)
-            .with_initial_capacity(num_vectors as usize);
-        let tracker = Arc::new(PrefixTracker::new(config));
-        
-        Self {
-            dataset,
-            protected_ids,
-            existence_map,
-            tracker,
-            strategy,
-        }
-    }
-
-    /// Get the tracker for sharing with other contexts
-    pub fn tracker(&self) -> Arc<PrefixTracker> {
-        Arc::clone(&self.tracker)
-    }
-}
-
-impl WorkloadContext for VectorDeleteContext {
-    fn claim_next_id(&self) -> Option<u64> {
-        // If we have both existence_map and protected_ids, use tracker-aware deletion
-        if let (Some(ref em), Some(ref pids)) = (&self.existence_map, &self.protected_ids) {
-            // Use the tracker-aware method that only returns existing, non-protected IDs
-            return pids.claim_deleteable_from_tracker(em.tracker());
-        }
-
-        // If we have protected_ids only, use simple counter-based claiming
-        if let Some(ref pids) = self.protected_ids {
-            return pids.claim_deleteable_id();
-        }
-
-        // No protection, use strategy-based iteration with tracker
-        // Iterator exhaustion signals completion - no wrap-around
-        let num_vectors = self.dataset.num_vectors();
-        let id = match &self.strategy {
-            IterationStrategy::Sequential => {
-                self.tracker.iter().continue_write().next().map(|(id, _)| id)
-            }
-            IterationStrategy::Random { seed } => {
-                self.tracker.iter().seed(*seed).continue_write().next().map(|(id, _)| id)
-            }
-            IterationStrategy::Zipfian { skew, seed } => {
-                self.tracker.iter()
-                    .distribution(AccessDistribution::Zipfian { skew: *skew })
-                    .seed(*seed)
-                    .continue_write()
-                    .next()
-                    .map(|(id, _)| id)
-            }
-            IterationStrategy::Subset { start, end, inner } => {
-                let base = self.tracker.iter().id_range(*start, *end);
-                match inner.as_ref() {
-                    IterationStrategy::Sequential => base.continue_write().next().map(|(id, _)| id),
-                    IterationStrategy::Random { seed } => base.seed(*seed).continue_write().next().map(|(id, _)| id),
-                    _ => base.continue_write().next().map(|(id, _)| id),
-                }
-            }
-        };
-
-        // Iterator is the source of truth - return None when exhausted
-        id.map(|i| i % num_vectors)
-    }
-
-    fn next_dataset_idx(&self) -> Option<u64> {
-        self.claim_next_id()
-    }
-
-    fn get_query_bytes(&self, _idx: u64) -> Option<&[u8]> {
-        None
-    }
-
-    fn get_vector_bytes(&self, _idx: u64) -> Option<&[u8]> {
-        None // Delete doesn't need vector bytes
-    }
-
-    fn compute_and_record_recall(&mut self, _query_idx: u64, _response: &RespValue) {
-        // No-op for delete workloads
-    }
-
-    fn take_metrics(&mut self) -> WorkloadMetrics {
-        WorkloadMetrics::None
-    }
-
-    fn num_items(&self) -> u64 {
-        self.dataset.num_vectors()
-    }
-
-    fn num_queries(&self) -> u64 {
-        0
-    }
-
-    fn uses_dataset_keys(&self) -> bool {
-        true // Key is the vector ID to delete
-    }
-
-    fn key_is_claimed_id(&self) -> bool {
-        true // Key is directly the claimed ID (vector ID to delete)
-    }
-}
-
-// =============================================================================
-// ProtectedDeleteContext - Uses shared ProtectedIds for VecDelProtected
+// DeleteContext - Uses shared ProtectedIds for VecDel
 // =============================================================================
 
 /// Context for vector deletion with GT protection
@@ -1262,7 +1089,7 @@ impl WorkloadContext for VectorDeleteContext {
 /// Uses shared ProtectedIds (like VecLoad uses shared VectorExistenceMap).
 /// All workers share the same atomic cursor via Arc<ProtectedIds>.
 /// Respects dataset offset and num_vectors like other contexts.
-pub struct ProtectedDeleteContext {
+pub struct DeleteContext {
     /// Dataset for offset/range info
     dataset: Arc<DatasetContext>,
     /// Shared protected IDs with atomic cursor
@@ -1271,7 +1098,7 @@ pub struct ProtectedDeleteContext {
     request_limit: Option<u64>,
 }
 
-impl ProtectedDeleteContext {
+impl DeleteContext {
     /// Create with shared ProtectedIds and dataset
     pub fn new(
         dataset: Arc<DatasetContext>,
@@ -1302,7 +1129,7 @@ impl ProtectedDeleteContext {
     }
 }
 
-impl WorkloadContext for ProtectedDeleteContext {
+impl WorkloadContext for DeleteContext {
     fn claim_next_id(&self) -> Option<u64> {
         // Check if we've hit the request limit
         if let Some(limit) = self.request_limit {
@@ -1921,26 +1748,17 @@ pub fn create_workload_context_with_iteration(
                 strategy,
             ))
         }
-        WorkloadType::VecDelete => {
-            let ds = dataset.expect("VecDelete requires dataset");
-            Box::new(VectorDeleteContext::with_strategy(
-                ds,
-                protected_ids,
-                None, // existence_map for deletion is passed separately if needed
-                strategy,
-            ))
-        }
-        WorkloadType::VecDelProtected => {
-            let ds = dataset.expect("VecDelProtected requires dataset");
+        WorkloadType::VecDel => {
+            let ds = dataset.expect("VecDel requires dataset");
             // Use shared ProtectedIds (like VecLoad uses shared VectorExistenceMap)
             // The dataset's offset and num_vectors are used in claim_next_id
             if let Some(pids) = protected_ids {
-                Box::new(ProtectedDeleteContext::new(ds, pids, request_limit))
+                Box::new(DeleteContext::new(ds, pids, request_limit))
             } else {
                 // No GT protection - create empty ProtectedIds with max possible range
                 let max_id = ds.effective_offset() + ds.num_vectors();
                 let empty_pids = Arc::new(ProtectedIds::new(std::iter::empty::<u64>(), max_id));
-                Box::new(ProtectedDeleteContext::new(ds, empty_pids, request_limit))
+                Box::new(DeleteContext::new(ds, empty_pids, request_limit))
             }
         }
         WorkloadType::VecUpdate => {
@@ -2207,7 +2025,7 @@ mod tests {
     }
 
     // =========================================================================
-    // ProtectedDeleteContext Tests - Verify GT skipping logic
+    // DeleteContext Tests - Verify GT skipping logic
     // =========================================================================
 
     /// Test GT skipping with bitmap directly (no dataset needed)
@@ -2341,7 +2159,7 @@ mod tests {
             gt_bitmap.add(id);
         }
 
-        // Simulate multiple claim_next_id calls (like ProtectedDeleteContext does)
+        // Simulate multiple claim_next_id calls (like DeleteContext does)
         let mut claimed: Vec<u64> = Vec::new();
 
         // Each call to iter().unset_only().continue_write().next() should advance the cursor

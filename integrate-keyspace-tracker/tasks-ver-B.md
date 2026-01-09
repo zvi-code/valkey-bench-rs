@@ -195,7 +195,7 @@ cargo test command_template -- --nocapture
 
 **Work Items:**
 - [ ] Update `create_vec_load_template()` to use `arg_prefixed_key()`
-- [ ] Update `VecDelete` case to use `arg_prefixed_key()`
+- [ ] Update `VecDel` case to use `arg_prefixed_key()`
 - [ ] Update `add_key` helper closure to always use simple prefixed keys
 - [ ] Remove all cluster hash tag logic from templates
 - [ ] Update unit tests
@@ -453,7 +453,7 @@ The unified keyspace module provides all required functionality.
 
 ---
 
-### Task 2.7: Update VectorDeleteContext ✅
+### Task 2.7: Update DeleteContext ✅
 
 **Work Items:**
 - [x] Add `with_existence_map()` constructor

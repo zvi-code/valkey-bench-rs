@@ -139,8 +139,8 @@ application:
 
 ### JSON Path Addressing
 **Status:** Planned
-**Description:** Extend `AddressConfig` to support JSON path addressing (`$.field.nested`) for JSON data type operations.
-**Note:** Hash field addressing already implemented via `--address-type "hash:prefix:f1,f2,f3"`.
+**Description:** Extend `AddressSpec` to support JSON path addressing (`$.field.nested`) for JSON data type operations.
+**Note:** Hash field addressing already implemented via `AddressSpec::hash_fields()`. Numeric field iteration via `AddressSpec::hash_numeric_field()`.
 **Benefits:** Test JSON-based data structures with nested field access.
 
 ### Node Balanced Load
@@ -310,7 +310,7 @@ Design investigations for future evolution. Not immediate tasks.
 | Dimension | Current State | Future Direction |
 |-----------|---------------|------------------|
 | Cluster Type | `EngineType` enum | Full `Platform` trait |
-| Addressable Space | `AddressConfig` (hash fields) | JSON paths, PubSub, multi-DB |
+| Addressable Space | `AddressSpec` (keys, hash fields, numeric fields) | JSON paths, PubSub, multi-DB |
 | Iterators | `IterationStrategy` enum | Composable iterator chains |
 | Workload | `ParallelWorkload`, `CompositeWorkload` | Nested composition |
 
@@ -330,13 +330,13 @@ pub trait Platform: Send + Sync {
 
 ### Extended Address Spaces
 **Status:** Exploration
-**Description:** Extend `AddressConfig` beyond hash fields:
+**Description:** Extend `AddressSpec` beyond current capabilities:
 - JSON path addressing (`$.field.nested`)
 - PubSub channel addressing
 - Multi-DB addressing
 - Stream entry addressing
 
-**Current:** Hash field iteration implemented via `--address-type`.
+**Current:** `AddressSpec` supports keys with numeric ranges, hash fields (literal, list, numeric), and independent key/field ranges via `PlaceholderSpec`.
 
 ### Nested Workload Composition
 **Status:** Exploration
@@ -377,8 +377,12 @@ pub enum Phase {
 
 ### Addressable Spaces (Hash Fields)
 **Completed**
-`AddressConfig` for hash field iteration beyond simple keys. CLI: `--address-type "hash:prefix:f1,f2,f3"`.
-**Files:** `src/workload/template_factory.rs`
+`AddressSpec` for unified key/field addressing with independent numeric ranges. Supports:
+- Key-only addressing: `AddressSpec::key(prefix, max_id)`
+- Hash field literals: `AddressSpec::hash_field(prefix, max_id, field_name)`
+- Hash field lists: `AddressSpec::hash_fields(prefix, max_id, vec![fields])`
+- Independent key/field ranges: `AddressSpec::hash_numeric_field(key_spec, field_spec)`
+**Files:** `src/workload/addressable.rs`, `src/workload/template_factory.rs`
 
 ### Parallel Workloads
 **Completed**

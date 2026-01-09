@@ -139,10 +139,10 @@ impl CompositeWorkload {
             // Auto-detect produce/consume based on workload type
             let mut phase = WorkloadPhase::from_type(workload_type, requests);
 
-            // VecLoad produces IDs, VecQuery/VecDelete consume IDs
+            // VecLoad produces IDs, VecQuery/VecDel consume IDs
             if workload_type == WorkloadType::VecLoad {
                 phase = phase.produces_ids();
-            } else if matches!(workload_type, WorkloadType::VecQuery | WorkloadType::VecDelete) {
+            } else if matches!(workload_type, WorkloadType::VecQuery | WorkloadType::VecDel) {
                 phase = phase.consumes_ids();
             }
 
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn test_name_display() {
         let cw = CompositeWorkload::parse("vec-load:10000,vec-query:1000").unwrap();
-        assert_eq!(cw.name(), "VECLOAD:10000->VECQUERY:1000");
+        assert_eq!(cw.name(), "VEC-LOAD:10000->VEC-QUERY:1000");
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn test_workload_trait() {
         let cw = CompositeWorkload::parse("vec-load:10000,vec-query:1000").unwrap();
-        assert_eq!(cw.name(), "VECLOAD:10000->VECQUERY:1000");
+        assert_eq!(cw.name(), "VEC-LOAD:10000->VEC-QUERY:1000");
         assert!(cw.is_write()); // VecLoad is a write
         assert!(cw.requires_dataset());
     }

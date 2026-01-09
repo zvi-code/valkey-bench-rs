@@ -1060,7 +1060,7 @@ pub struct VectorLoadContext {
 }
 
 /// Vector delete context
-pub struct VectorDeleteContext {
+pub struct DeleteContext {
     protected_ids: Arc<ProtectedVectorIds>,
     tag_map: Arc<ClusterTagMap>,
 }

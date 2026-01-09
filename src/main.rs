@@ -297,7 +297,7 @@ fn run_optimization(
     // Build protected IDs for workloads that need ground truth
     let needs_protected_ids = base_config.tests.iter().any(|t| {
         let lower = t.to_lowercase();
-        // Match vec-delete, vec-del-protected, and vec-gt-load
+        // Match vec-delete, vec-del, and vec-gt-load
         lower.contains("delete") || lower.contains("del-protected") || lower.contains("gt-load")
     });
     if needs_protected_ids && dataset.is_some() {
@@ -664,8 +664,8 @@ fn run() -> Result<()> {
     // The orchestrator.build_protected_ids() will only succeed if a dataset is loaded
     let needs_protected_ids = config.tests.iter().any(|t| {
         let lower = t.to_lowercase();
-        // Match vec-delete, vec-del-protected, and vec-gt-load
-        lower.contains("delete") || lower.contains("del-protected") || lower.contains("gt-load")
+        // Match vec-delete, vec-del, and vec-gt-load
+        lower.contains("delete") || lower.contains("vec-del") || lower.contains("gt-load")
     });
     if needs_protected_ids {
         // Try to build protected IDs - will fail gracefully if no dataset

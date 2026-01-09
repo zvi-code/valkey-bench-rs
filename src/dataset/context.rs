@@ -152,6 +152,34 @@ impl DatasetContext {
         &self.schema
     }
 
+    /// Get the key prefix from schema pattern
+    ///
+    /// Extracts the prefix portion before `{id}` from patterns like "vec:{id}" -> "vec:"
+    /// Returns `None` if no pattern is defined.
+    pub fn key_prefix(&self) -> Option<&str> {
+        self.schema.sections.keys.pattern.as_ref().and_then(|p| {
+            p.find("{id}").map(|idx| &p[..idx])
+        })
+    }
+
+    /// Get the key pattern from schema
+    ///
+    /// Returns the full pattern like "vec:{id}" if defined.
+    pub fn key_pattern(&self) -> Option<&str> {
+        self.schema.sections.keys.pattern.as_deref()
+    }
+
+    /// Get the first blob field's max_bytes as data_size hint
+    ///
+    /// Useful for non-vector workloads to determine payload size from schema.
+    pub fn blob_data_size(&self) -> Option<usize> {
+        self.schema.record.get_fields().and_then(|fields| {
+            fields.iter()
+                .find(|f| f.field_type == super::schema::FieldType::Blob)
+                .and_then(|f| f.max_bytes.map(|b| b as usize))
+        })
+    }
+
     /// Get the dataset name from schema
     #[inline]
     pub fn name(&self) -> &str {
@@ -777,5 +805,21 @@ mod tests {
         assert_eq!(offset, 1000);
         let remaining = schema_count.saturating_sub(offset);
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_key_prefix_extraction() {
+        // Test key prefix extraction from patterns
+        let pattern = "vec:{id}";
+        let prefix = pattern.find("{id}").map(|idx| &pattern[..idx]);
+        assert_eq!(prefix, Some("vec:"));
+
+        let pattern2 = "mykey_prefix{id}:suffix";
+        let prefix2 = pattern2.find("{id}").map(|idx| &pattern2[..idx]);
+        assert_eq!(prefix2, Some("mykey_prefix"));
+
+        let pattern3 = "{id}";
+        let prefix3 = pattern3.find("{id}").map(|idx| &pattern3[..idx]);
+        assert_eq!(prefix3, Some(""));
     }
 }

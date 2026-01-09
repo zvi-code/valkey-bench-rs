@@ -434,21 +434,23 @@ mod tests {
 
     #[test]
     fn test_extract_numeric_ids_with_cluster_tag() {
+        // When using cluster tags, the tag is part of the prefix
         let doc_ids = vec![
-            "zvec_:{ABC}:000000000001".to_string(),
-            "zvec_:{XYZ}:000000000042".to_string(),
-            "zvec_:{DEF}:000000000100".to_string(),
+            "zvec_{ABC}:000000000001".to_string(),
+            "zvec_{ABC}:000000000042".to_string(),
+            "zvec_{ABC}:000000000100".to_string(),
         ];
 
-        let ids = extract_numeric_ids(&doc_ids, "zvec_:");
+        let ids = extract_numeric_ids(&doc_ids, "zvec_{ABC}:");
         assert_eq!(ids, vec![1, 42, 100]);
     }
 
     #[test]
-    fn test_extract_numeric_ids_mixed_formats() {
+    fn test_extract_numeric_ids_mixed_prefixes() {
+        // Keys with different prefixes won't match a single prefix
         let doc_ids = vec![
-            "vec:000000000001".to_string(),         // Simple format
-            "vec:{ABC}:000000000042".to_string(),   // Cluster tag format
+            "vec:000000000001".to_string(),
+            "vec:000000000042".to_string(),
         ];
 
         let ids = extract_numeric_ids(&doc_ids, "vec:");

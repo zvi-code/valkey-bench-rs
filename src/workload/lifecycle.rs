@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_legacy_adapter_from_workload_type() {
         let adapter = LegacyWorkloadAdapter::from_workload_type(WorkloadType::VecQuery);
-        assert_eq!(adapter.name(), "VECQUERY");
+        assert_eq!(adapter.name(), "VEC-QUERY");
         assert!(!adapter.is_write());
         assert!(adapter.requires_dataset());
     }

@@ -30,15 +30,10 @@ pub enum WorkloadType {
     VecGtLoad,
     /// Query vectors with FT.SEARCH
     VecQuery,
-    /// Delete vector keys
-    VecDelete,
     /// Delete vectors with GT protection (simple bitmap-based approach)
-    VecDelProtected,
+    VecDel,
     /// Update existing vectors
     VecUpdate,
-
-    // === Custom command ===
-    Custom,
 }
 
 impl WorkloadType {
@@ -66,8 +61,7 @@ impl WorkloadType {
             "vecload" | "vec-load" | "vec_load" => Some(Self::VecLoad),
             "vecgtload" | "vec-gt-load" | "vec_gt_load" => Some(Self::VecGtLoad),
             "vecquery" | "vec-query" | "vec_query" => Some(Self::VecQuery),
-            "vecdelete" | "vec-delete" | "vec_delete" => Some(Self::VecDelete),
-            "vecdelprotected" | "vec-del-protected" | "vec_del_protected" => Some(Self::VecDelProtected),
+            "vecdelprotected" | "vec-del" | "vec_del_protected" => Some(Self::VecDel),
             "vecupdate" | "vec-update" | "vec_update" => Some(Self::VecUpdate),
             _ => None,
         }
@@ -94,26 +88,24 @@ impl WorkloadType {
             Self::Lrange500 => "LRANGE_500",
             Self::Lrange600 => "LRANGE_600",
             Self::Mset => "MSET",
-            Self::VecLoad => "VECLOAD",
-            Self::VecGtLoad => "VECGTLOAD",
-            Self::VecQuery => "VECQUERY",
-            Self::VecDelete => "VECDELETE",
-            Self::VecDelProtected => "VECDELPROTECTED",
-            Self::VecUpdate => "VECUPDATE",
-            Self::Custom => "CUSTOM",
+            Self::VecLoad => "VEC-LOAD",
+            Self::VecGtLoad => "VEC-GT-LOAD",
+            Self::VecQuery => "VEC-QUERY",
+            Self::VecDel => "VEC-DEL",
+            Self::VecUpdate => "VEC-UPDATE",
         }
     }
 
     /// Check if workload requires dataset
     pub fn requires_dataset(&self) -> bool {
-        matches!(self, Self::VecLoad | Self::VecGtLoad | Self::VecQuery | Self::VecUpdate | Self::VecDelete | Self::VecDelProtected)
+        matches!(self, Self::VecLoad | Self::VecGtLoad | Self::VecQuery | Self::VecUpdate | Self::VecDel)
     }
 
     /// Check if workload is a vector search operation
     pub fn is_vector_search(&self) -> bool {
         matches!(
             self,
-            Self::VecLoad | Self::VecGtLoad | Self::VecQuery | Self::VecDelete | Self::VecDelProtected | Self::VecUpdate
+            Self::VecLoad | Self::VecGtLoad | Self::VecQuery | Self::VecDel | Self::VecUpdate
         )
     }
 

@@ -861,14 +861,25 @@ impl Orchestrator {
             self.effective_requests()
         };
 
-        // Create command template (use cluster mode if we have cluster topology)
-        let cluster_mode = self.cluster_topology.is_some();
+        // Determine effective key_prefix and data_size
+        // Dataset schema takes precedence if available
+        let effective_key_prefix = self.dataset
+            .as_ref()
+            .and_then(|d| d.key_prefix().map(String::from))
+            .unwrap_or_else(|| self.config.key_prefix.clone());
+
+        let effective_data_size = self.dataset
+            .as_ref()
+            .and_then(|d| d.blob_data_size())
+            .unwrap_or(self.config.data_size);
+
+        // Create command template
         let template = create_template(
             workload,
-            &self.config.key_prefix,
-            self.config.data_size,
+            &effective_key_prefix,
+            effective_data_size,
             self.config.search_config.as_ref(),
-            cluster_mode,
+            None,
         );
 
         // Build command buffer for pipeline
@@ -1242,12 +1253,10 @@ impl Orchestrator {
 
     /// Run a parallel workload with weighted traffic
     pub fn run_parallel_test(&self, parallel: &ParallelWorkload) -> Result<BenchmarkResult> {
-        let cluster_mode = self.cluster_topology.is_some();
-
         // Create templates for each component workload using per-component configs
         let mut weighted_templates = Vec::new();
         for component in parallel.components() {
-            let template = component.config.build_template(cluster_mode);
+            let template = component.config.build_template();
             let buffer = template.build(self.config.pipeline as usize);
             weighted_templates.push((buffer, component.weight));
         }

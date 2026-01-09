@@ -831,13 +831,9 @@ impl EventWorker {
 
     /// Check if workload needs slot-aware routing
     /// 
-    /// With cluster-tagged keys (e.g., `key:{ABC}:000000000001`), all key-value
-    /// workloads route correctly via the ClusterTag placeholder, so we don't 
-    /// need special slot-aware routing. This returns false for all workloads
-    /// since cluster mode now uses cluster tags in keys.
+    /// Currently returns false as cluster mode uses standard key hashing.
+    /// Slot-aware routing is reserved for future features like node-balanced load.
     fn needs_slot_routing(&self) -> bool {
-        // All workloads now use cluster tags when in cluster mode,
-        // so we don't need special slot-aware routing
         false
     }
 
@@ -920,7 +916,7 @@ impl EventWorker {
                 let offset = template.absolute_offset(cmd_idx, ph.offset);
                 match ph.placeholder_type {
                     PlaceholderType::Key => {
-                        // For VecDelete: key is directly the claimed ID
+                        // For VecDel: key is directly the claimed ID
                         // For dataset workloads: key is set by Vector handler
                         // For simple workloads: key is the key_num
                         if self.workload_ctx.key_is_claimed_id() {
@@ -961,15 +957,6 @@ impl EventWorker {
                         let value = self.rng.u64(..);
                         write_fixed_width_u64(&mut self.clients[client_idx].write_buf, offset, value, ph.len);
                     }
-                    PlaceholderType::ClusterTag => {
-                        // Generate deterministic cluster tag from key_num
-                        let tag = Self::deterministic_cluster_tag(
-                            self.seed,
-                            key_num,
-                            |slot| self.clients[client_idx].owns_slot(slot),
-                        );
-                        self.clients[client_idx].write_buf[offset..offset + 5].copy_from_slice(&tag);
-                    }
                     PlaceholderType::Tag => {
                         // Delegate tag generation to workload context
                         let buf = &mut self.clients[client_idx].write_buf[offset..offset + ph.len];
@@ -1002,42 +989,6 @@ impl EventWorker {
                 }
             }
         }
-    }
-
-    /// Generate a deterministic cluster tag {ABC} based on seed and key_num
-    ///
-    /// The tag is derived deterministically from the key number, ensuring that
-    /// SET and GET with the same seed produce identical keys.
-    /// We iterate through deterministic candidates until finding one that
-    /// routes to a slot owned by the client.
-    #[inline]
-    fn deterministic_cluster_tag<F>(seed: u64, key_num: u64, owns_slot: F) -> [u8; 5]
-    where
-        F: Fn(u16) -> bool,
-    {
-        // Use a simple mixing function to generate deterministic tag candidates
-        // We try different "attempts" until we find a valid slot
-        for attempt in 0u64..10000 {
-            // Mix seed, key_num, and attempt to get a deterministic value
-            let mixed = seed
-                .wrapping_add(key_num.wrapping_mul(0x9E3779B97F4A7C15))
-                .wrapping_add(attempt.wrapping_mul(0x517CC1B727220A95));
-
-            // Extract 3 characters (A-Z)
-            let c1 = b'A' + (mixed % 26) as u8;
-            let c2 = b'A' + ((mixed >> 8) % 26) as u8;
-            let c3 = b'A' + ((mixed >> 16) % 26) as u8;
-
-            let candidate = [b'{', c1, c2, c3, b'}'];
-            let slot = slot_for_tag(&candidate);
-
-            if owns_slot(slot) {
-                return candidate;
-            }
-        }
-
-        // Fallback (should never happen with proper slot coverage)
-        [b'{', b'A', b'A', b'A', b'}']
     }
 
     /// Apply rate limiting if configured

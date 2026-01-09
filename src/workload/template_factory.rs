@@ -1,215 +1,140 @@
 //! Template factory for creating command templates for all workload types
+//!
+//! Uses `AddressSpec` from addressable.rs for unified key/address handling.
 
 use crate::config::SearchConfig;
 
-use super::addressable::AddressType;
+use super::addressable::{AddressSpec, AddressType, DEFAULT_KEY_WIDTH};
 use super::command_template::CommandTemplate;
-use super::key_format::DEFAULT_KEY_WIDTH;
 use super::workload_type::WorkloadType;
-
-/// Configuration for address-based templates (hash fields, JSON paths)
-#[derive(Debug, Clone)]
-pub struct AddressConfig {
-    /// Type of address space being used
-    pub address_type: AddressType,
-    /// Maximum field name length (for hash fields)
-    pub max_field_len: usize,
-    /// Maximum JSON path length (for JSON paths)
-    pub max_path_len: usize,
-}
-
-impl Default for AddressConfig {
-    fn default() -> Self {
-        Self {
-            address_type: AddressType::Key,
-            max_field_len: 32,
-            max_path_len: 64,
-        }
-    }
-}
-
-impl AddressConfig {
-    /// Create config for hash field addressing
-    pub fn hash_field(max_field_len: usize) -> Self {
-        Self {
-            address_type: AddressType::HashField,
-            max_field_len,
-            max_path_len: 64,
-        }
-    }
-
-    /// Create config for JSON path addressing
-    pub fn json_path(max_path_len: usize) -> Self {
-        Self {
-            address_type: AddressType::JsonPath,
-            max_field_len: 32,
-            max_path_len,
-        }
-    }
-}
 
 /// Create command template for given workload type
 ///
-/// The `cluster_mode` parameter is now ignored - all keys use simple format
-/// (e.g., `key:000000000001`). The cluster hash tag injection has been removed.
+/// # Arguments
+/// * `workload` - The workload type
+/// * `key_prefix` - Key prefix (e.g., "key:", "vec:")
+/// * `data_size` - Size of data payload for SET-like commands
+/// * `search_config` - Optional search configuration for vector workloads
+/// * `address_spec` - Optional address specification for sub-key iteration
 pub fn create_template(
     workload: WorkloadType,
     key_prefix: &str,
     data_size: usize,
     search_config: Option<&SearchConfig>,
-    _cluster_mode: bool, // Ignored: cluster hash tags removed
+    address_spec: Option<&AddressSpec>,
 ) -> CommandTemplate {
-    create_template_with_address(workload, key_prefix, data_size, search_config, false, None)
-}
-
-/// Create command template with optional address configuration
-///
-/// This variant allows specifying an AddressConfig to enable hash field or JSON path iteration.
-/// When address_config is provided with HashField type, HSET will use a Field placeholder.
-///
-/// Note: The `cluster_mode` parameter is now ignored. All keys use simple format.
-pub fn create_template_with_address(
-    workload: WorkloadType,
-    key_prefix: &str,
-    data_size: usize,
-    search_config: Option<&SearchConfig>,
-    _cluster_mode: bool, // Ignored: cluster hash tags removed
-    address_config: Option<&AddressConfig>,
-) -> CommandTemplate {
-    let key_width = DEFAULT_KEY_WIDTH;
-
-    // All keys now use simple prefixed format (no cluster hash tags)
-    let add_key = |template: CommandTemplate| -> CommandTemplate {
-        template.arg_prefixed_key(key_prefix, key_width)
-    };
+    // Use provided AddressSpec or create simple key-only spec
+    let default_spec = AddressSpec::with_width(key_prefix, DEFAULT_KEY_WIDTH, u64::MAX);
+    let spec = address_spec.unwrap_or(&default_spec);
 
     match workload {
         // === Simple commands ===
         WorkloadType::Ping => CommandTemplate::new("PING").arg_str("PING"),
 
         // === Key-value commands ===
-        WorkloadType::Set => add_key(CommandTemplate::new("SET").arg_str("SET"))
+        WorkloadType::Set => spec
+            .add_key_to_template(CommandTemplate::new("SET").arg_str("SET"))
             .arg_literal(&vec![b'x'; data_size]),
 
-        WorkloadType::Get => add_key(CommandTemplate::new("GET").arg_str("GET")),
+        WorkloadType::Get => spec.add_key_to_template(CommandTemplate::new("GET").arg_str("GET")),
 
-        WorkloadType::Incr => add_key(CommandTemplate::new("INCR").arg_str("INCR")),
+        WorkloadType::Incr => {
+            spec.add_key_to_template(CommandTemplate::new("INCR").arg_str("INCR"))
+        }
 
         // === List commands ===
-        WorkloadType::Lpush => add_key(CommandTemplate::new("LPUSH").arg_str("LPUSH"))
+        WorkloadType::Lpush => spec
+            .add_key_to_template(CommandTemplate::new("LPUSH").arg_str("LPUSH"))
             .arg_literal(&vec![b'x'; data_size]),
 
-        WorkloadType::Rpush => add_key(CommandTemplate::new("RPUSH").arg_str("RPUSH"))
+        WorkloadType::Rpush => spec
+            .add_key_to_template(CommandTemplate::new("RPUSH").arg_str("RPUSH"))
             .arg_literal(&vec![b'x'; data_size]),
 
-        WorkloadType::Lpop => add_key(CommandTemplate::new("LPOP").arg_str("LPOP")),
+        WorkloadType::Lpop => {
+            spec.add_key_to_template(CommandTemplate::new("LPOP").arg_str("LPOP"))
+        }
 
-        WorkloadType::Rpop => add_key(CommandTemplate::new("RPOP").arg_str("RPOP")),
+        WorkloadType::Rpop => {
+            spec.add_key_to_template(CommandTemplate::new("RPOP").arg_str("RPOP"))
+        }
 
-        WorkloadType::Lrange100 => create_lrange_template(key_prefix, key_width, 100),
-        WorkloadType::Lrange300 => create_lrange_template(key_prefix, key_width, 300),
-        WorkloadType::Lrange500 => create_lrange_template(key_prefix, key_width, 500),
-        WorkloadType::Lrange600 => create_lrange_template(key_prefix, key_width, 600),
+        WorkloadType::Lrange100 => create_lrange_template(spec, 100),
+        WorkloadType::Lrange300 => create_lrange_template(spec, 300),
+        WorkloadType::Lrange500 => create_lrange_template(spec, 500),
+        WorkloadType::Lrange600 => create_lrange_template(spec, 600),
 
         // === Set commands ===
-        WorkloadType::Sadd => add_key(CommandTemplate::new("SADD").arg_str("SADD"))
-            .arg_rand_int(key_width),
+        WorkloadType::Sadd => spec
+            .add_key_to_template(CommandTemplate::new("SADD").arg_str("SADD"))
+            .arg_literal(&vec![b'x'; data_size]),
 
-        WorkloadType::Spop => add_key(CommandTemplate::new("SPOP").arg_str("SPOP")),
+        WorkloadType::Spop => {
+            spec.add_key_to_template(CommandTemplate::new("SPOP").arg_str("SPOP"))
+        }
 
         // === Hash commands ===
         WorkloadType::Hset => {
-            let template = add_key(CommandTemplate::new("HSET").arg_str("HSET"));
-            // Use Field placeholder when address_config specifies hash field iteration
-            if let Some(cfg) = address_config {
-                if cfg.address_type == AddressType::HashField {
-                    return template
-                        .arg_field(cfg.max_field_len)
-                        .arg_literal(&vec![b'x'; data_size]);
-                }
+            let template =
+                spec.add_key_to_template(CommandTemplate::new("HSET").arg_str("HSET"));
+            // AddressSpec handles field placeholder if sub_key is set
+            // If no sub_key, use default literal field name
+            if spec.address_type() == AddressType::Key {
+                template.arg_str("field").arg_literal(&vec![b'x'; data_size])
+            } else {
+                template.arg_literal(&vec![b'x'; data_size])
             }
-            // Default: literal field name
-            template
-                .arg_str("field")
-                .arg_literal(&vec![b'x'; data_size])
         }
 
         // === Sorted set commands ===
-        WorkloadType::Zadd => add_key(CommandTemplate::new("ZADD").arg_str("ZADD"))
-            .arg_rand_int(key_width) // score
-            .arg_str("member"),
+        WorkloadType::Zadd => spec
+            .add_key_to_template(CommandTemplate::new("ZADD").arg_str("ZADD"))
+            .arg_rand_int(spec.key_width())
+            .arg_literal(&vec![b'x'; data_size]),
 
-        WorkloadType::Zpopmin => add_key(CommandTemplate::new("ZPOPMIN").arg_str("ZPOPMIN")),
-
-        // === Multi-key commands ===
-        WorkloadType::Mset => create_mset_template(key_prefix, key_width, data_size, 10),
-
-        // === Vector search commands (simple key format) ===
-        WorkloadType::VecLoad => {
-            let sc = search_config.expect("VecLoad requires search config");
-            create_vec_load_template(sc, key_width)
+        WorkloadType::Zpopmin => {
+            spec.add_key_to_template(CommandTemplate::new("ZPOPMIN").arg_str("ZPOPMIN"))
         }
 
-        WorkloadType::VecGtLoad => {
-            let sc = search_config.expect("VecGtLoad requires search config");
-            // Same template as VecLoad - only loads GT vectors
-            create_vec_load_template(sc, key_width)
+        // === Multi-key commands ===
+        WorkloadType::Mset => create_mset_template(spec, data_size, 10),
+
+        // === Vector search commands ===
+        WorkloadType::VecLoad | WorkloadType::VecGtLoad | WorkloadType::VecUpdate => {
+            let sc = search_config.expect("Vector workload requires search config");
+            create_vec_load_template(sc)
         }
 
         WorkloadType::VecQuery => {
             let sc = search_config.expect("VecQuery requires search config");
             create_vec_query_template(sc)
         }
-
-        WorkloadType::VecDelete => {
-            let sc = search_config.expect("VecDelete requires search config");
-            // Simple key format: prefix + zero-padded ID
-            CommandTemplate::new("DEL")
-                .arg_str("DEL")
-                .arg_prefixed_key(&sc.prefix, key_width)
-        }
-
-        WorkloadType::VecDelProtected => {
+        WorkloadType::VecDel => {
             let sc = search_config.expect("VecDelProtected requires search config");
             // Same as VecDelete - just DEL with prefixed key
-            // The GT protection is handled by ProtectedDeleteContext
+            // The GT protection is handled by DeleteContext
             CommandTemplate::new("DEL")
                 .arg_str("DEL")
-                .arg_prefixed_key(&sc.prefix, key_width)
-        }
-
-        WorkloadType::VecUpdate => {
-            let sc = search_config.expect("VecUpdate requires search config");
-            create_vec_load_template(sc, key_width)
-        }
-
-        WorkloadType::Custom => {
-            // Custom commands should be handled separately
-            CommandTemplate::new("CUSTOM").arg_str("PING")
-        }
+                .arg_prefixed_key(&sc.prefix, spec.key_width())
+        }        
     }
 }
 
 /// Create LRANGE template with specified count
-fn create_lrange_template(key_prefix: &str, key_width: usize, count: i32) -> CommandTemplate {
-    CommandTemplate::new(&format!("LRANGE_{}", count))
-        .arg_str("LRANGE")
-        .arg_prefixed_key(key_prefix, key_width)
-        .arg_str("0")
-        .arg_str(&(count - 1).to_string())
+fn create_lrange_template(spec: &AddressSpec, count: i32) -> CommandTemplate {
+    spec.add_key_to_template(
+        CommandTemplate::new(&format!("LRANGE_{}", count)).arg_str("LRANGE"),
+    )
+    .arg_str("0")
+    .arg_str(&(count - 1).to_string())
 }
 
 /// Create MSET template with multiple keys
-fn create_mset_template(
-    key_prefix: &str,
-    key_width: usize,
-    data_size: usize,
-    num_keys: usize,
-) -> CommandTemplate {
+fn create_mset_template(spec: &AddressSpec, data_size: usize, num_keys: usize) -> CommandTemplate {
     let mut template = CommandTemplate::new("MSET").arg_str("MSET");
 
     for _ in 0..num_keys {
-        template = template.arg_prefixed_key(key_prefix, key_width);
+        template = template.arg_prefixed_key(spec.prefix(), spec.key_width());
         template = template.arg_literal(&vec![b'x'; data_size]);
     }
 
@@ -217,21 +142,20 @@ fn create_mset_template(
 }
 
 /// Create HSET template for vector loading
-/// Key format: prefix + zero-padded ID (e.g., "zvec_:000000055083")
 ///
 /// Fields added:
 /// - vector_field: <vector data> (always)
 /// - tag_field: <tag value> (if search_config.tag_field is set)
 /// - numeric_field(s): <numeric value> (from search_config.numeric_fields)
-fn create_vec_load_template(search_config: &SearchConfig, key_width: usize) -> CommandTemplate {
-    // Simple key format: prefix + zero-padded vector ID
-    let mut template = CommandTemplate::new("HSET")
-        .arg_str("HSET")
-        .arg_prefixed_key(&search_config.prefix, key_width)
+fn create_vec_load_template(search_config: &SearchConfig) -> CommandTemplate {
+    let spec = AddressSpec::with_width(&search_config.prefix, DEFAULT_KEY_WIDTH, u64::MAX);
+
+    let mut template = spec
+        .add_key_to_template(CommandTemplate::new("HSET").arg_str("HSET"))
         .arg_str(&search_config.vector_field)
         .arg_vector(search_config.vec_byte_len());
 
-    // Add tag field if configured (this is INDEX tag field, NOT cluster hash tag)
+    // Add tag field if configured
     if let Some(ref tag_field) = search_config.tag_field {
         template = template
             .arg_str(tag_field)
@@ -325,32 +249,44 @@ mod tests {
 
     #[test]
     fn test_create_ping_template() {
-        let template = create_template(WorkloadType::Ping, "key:", 3, None, false);
+        let template = create_template(WorkloadType::Ping, "key:", 3, None, None);
         let buf = template.build(1);
         assert!(buf.placeholders[0].is_empty());
     }
 
     #[test]
     fn test_create_set_template() {
-        let template = create_template(WorkloadType::Set, "key:", 100, None, false);
+        let template = create_template(WorkloadType::Set, "key:", 100, None, None);
         let buf = template.build(1);
         assert_eq!(buf.placeholders[0].len(), 1); // Key placeholder
     }
 
     #[test]
-    fn test_create_set_template_cluster_mode() {
-        // Note: cluster_mode parameter is now ignored (cluster hash tags removed)
-        let template = create_template(WorkloadType::Set, "key:", 100, None, true);
+    fn test_create_set_with_address_spec() {
+        let spec = AddressSpec::key("mykey:", 1_000_000);
+        let template = create_template(WorkloadType::Set, "key:", 100, None, Some(&spec));
         let buf = template.build(1);
-        // All keys now use simple format: just 1 key placeholder
-        assert_eq!(buf.placeholders[0].len(), 1);
+        assert_eq!(buf.placeholders[0].len(), 1); // Key placeholder
     }
 
     #[test]
     fn test_create_get_template() {
-        let template = create_template(WorkloadType::Get, "key:", 3, None, false);
+        let template = create_template(WorkloadType::Get, "key:", 3, None, None);
         let buf = template.build(1);
         assert_eq!(buf.placeholders[0].len(), 1); // Key placeholder
+    }
+
+    #[test]
+    fn test_create_hset_with_field_iteration() {
+        let spec = AddressSpec::hash_fields(
+            "obj:",
+            100_000,
+            vec!["f1".to_string(), "f2".to_string()],
+        );
+        let template = create_template(WorkloadType::Hset, "obj:", 50, None, Some(&spec));
+        let buf = template.build(1);
+        // Key placeholder + Field placeholder = 2 placeholders
+        assert_eq!(buf.placeholders[0].len(), 2);
     }
 
     #[test]
@@ -376,11 +312,10 @@ mod tests {
             numeric_filters: Vec::new(),
         };
 
-        let template = create_template(WorkloadType::VecLoad, "key:", 3, Some(&search_config), false);
+        let template = create_template(WorkloadType::VecLoad, "key:", 3, Some(&search_config), None);
         let buf = template.build(1);
 
-        // VecLoad now uses simple key format:
-        // 1 key placeholder + 1 vector placeholder = 2 total
+        // VecLoad: 1 key placeholder + 1 vector placeholder = 2 total
         assert_eq!(buf.placeholders[0].len(), 2);
     }
 }

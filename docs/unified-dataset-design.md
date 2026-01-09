@@ -937,7 +937,7 @@ pub enum WorkloadType {
     Lpush, Rpush, Lpop, Rpop,
     Lrange100, Lrange300, Lrange500, Lrange600,
     Sadd, Spop, Hset, Zadd, Zpopmin, Mset,
-    VecLoad, VecQuery, VecDelete, VecUpdate,
+    VecLoad, VecQuery, VecDel, VecUpdate,
     Custom,
 
     // New: Schema-driven workloads

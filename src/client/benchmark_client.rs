@@ -33,13 +33,11 @@ pub enum PlaceholderType {
     Vector,
     /// Query vector data (binary blob) - for FT.SEARCH queries
     QueryVector,
-    /// Cluster routing tag {xxx}
-    ClusterTag,
     /// Random integer
     RandInt,
     /// Tag field value (variable-length string, padded to max length)
     Tag,
-    /// Numeric field value (fixed-width decimal) - backward compatibility
+    /// Numeric field value (fixed-width decimal)
     Numeric,
     /// Indexed numeric field with configurable type/distribution
     /// The usize is the index into the NumericFieldSet
@@ -184,18 +182,6 @@ impl BenchmarkClient {
     ) {
         let offset = self.write_buf.absolute_offset(cmd_idx, ph_offset.offset);
         self.write_buf.bytes[offset..offset + vector_bytes.len()].copy_from_slice(vector_bytes);
-    }
-
-    /// Replace cluster tag placeholder
-    #[inline]
-    pub fn replace_cluster_tag(
-        &mut self,
-        cmd_idx: usize,
-        tag: &[u8; 5],
-        ph_offset: &PlaceholderOffset,
-    ) {
-        let offset = self.write_buf.absolute_offset(cmd_idx, ph_offset.offset);
-        self.write_buf.bytes[offset..offset + 5].copy_from_slice(tag);
     }
 
     /// Track inflight dataset index for retry

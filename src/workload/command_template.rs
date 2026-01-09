@@ -82,15 +82,6 @@ impl CommandTemplate {
         self
     }
 
-    /// Add cluster tag placeholder
-    pub fn arg_cluster_tag(mut self) -> Self {
-        self.args.push(TemplateArg::Placeholder {
-            ph_type: PlaceholderType::ClusterTag,
-            len: 5, // {xxx}
-        });
-        self
-    }
-
     /// Add random integer placeholder
     pub fn arg_rand_int(mut self, width: usize) -> Self {
         self.args.push(TemplateArg::Placeholder {
@@ -163,10 +154,31 @@ impl CommandTemplate {
     /// Add prefixed key placeholder (prefix + fixed-width decimal in single arg)
     /// The key will be: prefix + 0-padded decimal number
     pub fn arg_prefixed_key(mut self, prefix: &str, width: usize) -> Self {
-        // We need a special TemplateArg that has both a prefix and placeholder
         self.args.push(TemplateArg::PrefixedPlaceholder {
             prefix: prefix.as_bytes().to_vec(),
             ph_type: PlaceholderType::Key,
+            len: width,
+        });
+        self
+    }
+
+    /// Add prefixed field placeholder (prefix + fixed-width decimal in single arg)
+    /// For numeric field iteration: field_prefix + 0-padded decimal number
+    pub fn arg_prefixed_field(mut self, prefix: &str, width: usize) -> Self {
+        self.args.push(TemplateArg::PrefixedPlaceholder {
+            prefix: prefix.as_bytes().to_vec(),
+            ph_type: PlaceholderType::Field,
+            len: width,
+        });
+        self
+    }
+
+    /// Add prefixed JSON path placeholder (prefix + fixed-width decimal in single arg)
+    /// For numeric path iteration: path_prefix + 0-padded decimal number
+    pub fn arg_prefixed_json_path(mut self, prefix: &str, width: usize) -> Self {
+        self.args.push(TemplateArg::PrefixedPlaceholder {
+            prefix: prefix.as_bytes().to_vec(),
+            ph_type: PlaceholderType::JsonPath,
             len: width,
         });
         self
