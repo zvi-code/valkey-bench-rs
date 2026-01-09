@@ -1,4 +1,9 @@
 /target
 .claude/
 venv/
+*.bin
+*.log
+*.tmp
+./datasets/raw/
+./keyspace_tracker/
 
