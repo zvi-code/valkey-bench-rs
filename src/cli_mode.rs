@@ -85,14 +85,50 @@ pub fn run_cli_command(args: &CliArgs, command_args: &[String]) -> anyhow::Resul
         .create(host, port)
         .map_err(|e| anyhow::anyhow!("Connection failed: {}", e))?;
 
-    // Execute the command
-    let args_refs: Vec<&str> = command_args.iter().map(|s| s.as_str()).collect();
-    let response = conn.execute(&args_refs)?;
+    // Process arguments - decode hex-encoded binary data
+    let binary_args: Vec<Vec<u8>> = command_args.iter().map(|s| decode_arg(s)).collect();
+    let args_refs: Vec<&[u8]> = binary_args.iter().map(|v| v.as_slice()).collect();
+    
+    // Execute with binary support
+    let response = conn.execute_binary(&args_refs)?;
 
     // Print the response
     print_response(&response, 0);
 
     Ok(())
+}
+
+/// Decode a CLI argument, handling hex-encoded binary data
+/// 
+/// Supports two formats:
+/// 1. Hex string (all lowercase hex chars, even length): "cdcccc3d..." -> binary bytes
+/// 2. Regular string: passed as-is
+fn decode_arg(arg: &str) -> Vec<u8> {
+    // Check if this looks like a hex-encoded binary blob
+    // Must be even length, reasonably long (at least 8 chars for a float), and all hex chars
+    if arg.len() >= 8 && arg.len() % 2 == 0 && arg.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Try to decode as hex
+        if let Some(bytes) = hex_decode(arg) {
+            return bytes;
+        }
+    }
+    
+    // Return as regular UTF-8 string
+    arg.as_bytes().to_vec()
+}
+
+/// Decode a hex string to bytes
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let mut chars = hex.chars();
+    
+    while let (Some(h), Some(l)) = (chars.next(), chars.next()) {
+        let high = h.to_digit(16)?;
+        let low = l.to_digit(16)?;
+        bytes.push((high * 16 + low) as u8);
+    }
+    
+    Some(bytes)
 }
 
 /// Build connection factory from CLI args
@@ -215,9 +251,12 @@ fn run_repl(conn: &mut RawConnection, host: &str, port: u16) -> anyhow::Result<(
                     continue;
                 }
 
-                // Execute command
-                let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match conn.execute(&args_refs) {
+                // Process arguments - decode hex-encoded binary data
+                let binary_args: Vec<Vec<u8>> = args.iter().map(|s| decode_arg(s)).collect();
+                let args_refs: Vec<&[u8]> = binary_args.iter().map(|v| v.as_slice()).collect();
+                
+                // Execute command with binary support
+                match conn.execute_binary(&args_refs) {
                     Ok(response) => {
                         print_response(&response, 0);
                     }

@@ -18,7 +18,7 @@
 //! └─────────────────┘    └─────────────────┘    └─────────────────┘
 //!        │                       │                      │
 //!        ▼                       ▼                      ▼
-//!   VectorExistenceMap   GroundTruthAwareRecall  AdjustedRecallStats
+//!   KeyGroupExistanceTracker   GroundTruthAwareRecall  AdjustedRecallStats
 //!   tracks all vectors    decides what to skip    shows GT coverage
 //! ```
 
@@ -28,7 +28,7 @@ use keyspace_tracker::{PrefixTracker, ReferenceSet, TrackerConfig};
 
 // These would be imported from valkey_bench_rs in actual usage
 // use valkey_bench_rs::keyspace::{
-//     GroundTruthAwareRecall, GroundTruthMode, ProtectedIds, VectorExistenceMap,
+//     GroundTruthAwareRecall, GroundTruthMode, ProtectedIds, KeyGroupExistanceTracker,
 // };
 // use valkey_bench_rs::dataset::DatasetContext;
 

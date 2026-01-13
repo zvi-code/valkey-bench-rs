@@ -23,7 +23,7 @@ use keyspace_tracker::{AccessDistribution, PrefixTracker, TrackerConfig};
 use crate::benchmark::RecallStats;
 use crate::client::PlaceholderType;
 use crate::dataset::DatasetContext;
-use crate::keyspace::{ProtectedIds, VectorExistenceMap};
+use crate::keyspace::{ProtectedIds, KeyGroupExistanceTracker};
 use crate::utils::RespValue;
 use crate::workload::{
     extract_numeric_ids, parse_search_response, Address, AddressType, AddressableSpace,
@@ -512,7 +512,7 @@ impl WorkloadContext for SimpleContext {
 /// - Without `existence_map`: Sequential iteration through dataset via tracker
 pub struct VectorLoadContext {
     dataset: Arc<DatasetContext>,
-    existence_map: Option<Arc<VectorExistenceMap>>,
+    existence_map: Option<Arc<KeyGroupExistanceTracker>>,
     tag_distributions: Option<TagDistributionSet>,
     numeric_fields: NumericFieldSet,
     /// Tracker for vector iteration (prefix: "vec:<dataset-name>:")
@@ -526,7 +526,7 @@ pub struct VectorLoadContext {
 impl VectorLoadContext {
     pub fn new(
         dataset: Arc<DatasetContext>,
-        existence_map: Option<Arc<VectorExistenceMap>>,
+        existence_map: Option<Arc<KeyGroupExistanceTracker>>,
         tag_distributions: Option<TagDistributionSet>,
         numeric_fields: NumericFieldSet,
     ) -> Self {
@@ -535,7 +535,7 @@ impl VectorLoadContext {
 
     pub fn with_strategy(
         dataset: Arc<DatasetContext>,
-        existence_map: Option<Arc<VectorExistenceMap>>,
+        existence_map: Option<Arc<KeyGroupExistanceTracker>>,
         tag_distributions: Option<TagDistributionSet>,
         numeric_fields: NumericFieldSet,
         strategy: IterationStrategy,
@@ -829,7 +829,7 @@ impl WorkloadContext for VectorQueryContext {
 /// let gt_recall = dataset.build_gt_aware_recall(GroundTruthMode::Adjusted, k);
 ///
 /// // 2. Create existence tracker for vectors
-/// let existence_map = Arc::new(VectorExistenceMap::new("vec:", num_vectors, true));
+/// let existence_map = Arc::new(KeyGroupExistanceTracker::new("vec:", num_vectors, true));
 /// // ... populate from scan ...
 ///
 /// // 3. Run deletions (with or without GT protection)
@@ -1086,7 +1086,7 @@ impl WorkloadContext for VectorQueryWithDeletesContext {
 
 /// Context for vector deletion with GT protection
 ///
-/// Uses shared ProtectedIds (like VecLoad uses shared VectorExistenceMap).
+/// Uses shared ProtectedIds (like VecLoad uses shared KeyGroupExistanceTracker).
 /// All workers share the same atomic cursor via Arc<ProtectedIds>.
 /// Respects dataset offset and num_vectors like other contexts.
 pub struct DeleteContext {
@@ -1656,7 +1656,7 @@ impl WorkloadContext for AddressableContext {
 pub fn create_workload_context(
     workload_type: WorkloadType,
     dataset: Option<Arc<DatasetContext>>,
-    existence_map: Option<Arc<VectorExistenceMap>>,
+    existence_map: Option<Arc<KeyGroupExistanceTracker>>,
     protected_ids: Option<Arc<ProtectedIds>>,
     tag_distributions: Option<TagDistributionSet>,
     numeric_fields: NumericFieldSet,
@@ -1687,7 +1687,7 @@ pub fn create_workload_context(
 pub fn create_workload_context_with_iteration(
     workload_type: WorkloadType,
     dataset: Option<Arc<DatasetContext>>,
-    existence_map: Option<Arc<VectorExistenceMap>>,
+    existence_map: Option<Arc<KeyGroupExistanceTracker>>,
     protected_ids: Option<Arc<ProtectedIds>>,
     tag_distributions: Option<TagDistributionSet>,
     numeric_fields: NumericFieldSet,
@@ -1750,7 +1750,7 @@ pub fn create_workload_context_with_iteration(
         }
         WorkloadType::VecDel => {
             let ds = dataset.expect("VecDel requires dataset");
-            // Use shared ProtectedIds (like VecLoad uses shared VectorExistenceMap)
+            // Use shared ProtectedIds (like VecLoad uses shared KeyGroupExistanceTracker)
             // The dataset's offset and num_vectors are used in claim_next_id
             if let Some(pids) = protected_ids {
                 Box::new(DeleteContext::new(ds, pids, request_limit))

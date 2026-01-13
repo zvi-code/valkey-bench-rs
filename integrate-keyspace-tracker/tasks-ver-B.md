@@ -372,7 +372,7 @@ The unified keyspace module provides all required functionality.
 **File:** `src/keyspace/mod.rs` (new file)
 
 **Work Items:**
-- [x] Create `VectorExistenceMap` struct wrapping PrefixTracker
+- [x] Create `KeyGroupExistanceTracker` struct wrapping PrefixTracker
 - [x] Create `ProtectedIds` struct wrapping ReferenceSet
 - [x] Implement atomic claim operations via tracker iteration
 - [x] Export from `src/lib.rs`
@@ -380,18 +380,18 @@ The unified keyspace module provides all required functionality.
 
 **Acceptance Criteria:**
 - [x] Module compiles and is exported
-- [x] VectorExistenceMap provides claim_unmapped_id() with atomic semantics
+- [x] KeyGroupExistanceTracker provides claim_unmapped_id() with atomic semantics
 - [x] ProtectedIds provides claim_deleteable_from_tracker() for existence-aware deletion
 - [x] Unit tests pass: `cargo test keyspace`
 
 ---
 
-### Task 2.3: Replace ClusterTagMap with VectorExistenceMap ✅
+### Task 2.3: Replace ClusterTagMap with KeyGroupExistanceTracker ✅
 
-**Goal:** Replace ClusterTagMap with VectorExistenceMap using PrefixTracker.
+**Goal:** Replace ClusterTagMap with KeyGroupExistanceTracker using PrefixTracker.
 
 **Work Items:**
-- [x] Create `VectorExistenceMap` wrapper with atomic operations
+- [x] Create `KeyGroupExistanceTracker` wrapper with atomic operations
 - [x] Update `VectorLoadContext`: replace `tag_map` field with `existence_map`
 - [x] Update `claim_unmapped_id()`: use `tracker.iter().unset_only().write()`
 - [x] Delete `src/cluster/cluster_tag_map.rs`
@@ -723,7 +723,7 @@ cargo test mixed_ratio -- --nocapture
 | Criterion | Status | Evidence Required |
 |-----------|--------|-------------------|
 | `cargo test` passes | [x] | 266 tests pass, 0 failures |
-| `cluster_tag_map.rs` deleted | [x] | File removed, replaced by VectorExistenceMap |
+| `cluster_tag_map.rs` deleted | [x] | File removed, replaced by KeyGroupExistanceTracker |
 | `protected_ids.rs` deleted | [x] | File removed, replaced by ProtectedIds |
 | vec-load throughput ≥ 6,646 req/s | [ ] | Benchmark report (pending) |
 | vec-query P99 ≤ 7.33ms | [ ] | Benchmark report (pending) |

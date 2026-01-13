@@ -20,7 +20,7 @@ use crate::cluster::{
 use crate::config::BenchmarkConfig;
 use crate::dataset::DatasetContext;
 use crate::keyspace::{
-    build_vector_id_mappings, ClusterScanConfig, ProtectedIds, VectorExistenceMap,
+    build_vector_id_mappings, ClusterScanConfig, ProtectedIds, KeyGroupExistanceTracker,
 };
 use crate::metrics::info_fields::{default_info_fields, default_search_info_fields, InfoFieldType};
 use crate::metrics::reporter::{BenchmarkResults, OutputFormat};
@@ -190,9 +190,9 @@ pub struct Orchestrator {
     cluster_topology: Option<ClusterTopology>,
     /// Shared topology manager for dynamic cluster updates
     topology_manager: Option<Arc<TopologyManager>>,
-    /// Vector existence map for tracking which vectors exist (for vec-query with existing data)
-    existence_map: Option<Arc<VectorExistenceMap>>,
-    /// Protected vector IDs (ground truth) for deletion benchmarks
+    /// Keys existence map for tracking which keys exist (for vec-query with existing data)
+    existence_map: Option<Arc<KeyGroupExistanceTracker>>,
+    /// Protected key IDs (ground truth) for deletion benchmarks
     protected_ids: Option<Arc<ProtectedIds>>,
     /// Backend abstraction for engine-specific behavior (ElastiCache, MemoryDB, Valkey OSS)
     backend: Arc<dyn ClusterBackend>,
@@ -294,13 +294,13 @@ impl Orchestrator {
     }
 
     /// Set an existing existence map (for sharing across optimization iterations)
-    pub fn set_existence_map(&mut self, existence_map: Arc<VectorExistenceMap>) {
+    pub fn set_existence_map(&mut self, existence_map: Arc<KeyGroupExistanceTracker>) {
         self.existence_map = Some(existence_map);
     }
 
-    /// Build protected vector IDs from dataset ground truth
+    /// Build protected keys IDs from dataset ground truth
     ///
-    /// This extracts all vector IDs that appear in the ground truth neighbor lists.
+    /// This extracts all key IDs that appear in the ground truth neighbor lists.
     /// These IDs will be skipped during vec-delete to ensure valid recall computation.
     pub fn build_protected_ids(&mut self) -> Result<()> {
         let dataset = self.dataset.as_ref().ok_or_else(|| {
@@ -645,7 +645,7 @@ impl Orchestrator {
             );
         }
 
-        let existence_map = Arc::new(VectorExistenceMap::new(
+        let existence_map = Arc::new(KeyGroupExistanceTracker::new(
             &search_config.prefix,
             capacity,
             is_cluster,
@@ -688,7 +688,7 @@ impl Orchestrator {
     }
 
     /// Get existence map
-    pub fn existence_map(&self) -> Option<Arc<VectorExistenceMap>> {
+    pub fn existence_map(&self) -> Option<Arc<KeyGroupExistanceTracker>> {
         self.existence_map.clone()
     }
 

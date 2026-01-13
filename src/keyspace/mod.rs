@@ -2,7 +2,7 @@
 //!
 //! This module provides unified keyspace management using the keyspace_tracker crate:
 //!
-//! - **VectorExistenceMap**: Tracks which vector IDs exist in the cluster (replaces ClusterTagMap)
+//! - **KeyGroupExistanceTracker**: Tracks which vector IDs exist in the cluster (replaces ClusterTagMap)
 //! - **ProtectedIds**: Ground truth protection for deletion benchmarks (replaces ProtectedVectorIds)
 //! - **GroundTruthAwareRecall**: Recall computation under deletions (protected or adjusted mode)
 //!
@@ -37,7 +37,7 @@ pub use keyspace_tracker::{
 /// # Example
 ///
 /// ```ignore
-/// let tracker = VectorExistenceMap::new("vec:", 1_000_000, true);
+/// let tracker = KeyGroupExistanceTracker::new("vec:", 1_000_000, true);
 ///
 /// // Mark vectors as existing
 /// tracker.add(0);
@@ -50,7 +50,7 @@ pub use keyspace_tracker::{
 /// // Claim unmapped IDs for loading
 /// let id = tracker.claim_unmapped_id(1_000_000);
 /// ```
-pub struct VectorExistenceMap {
+pub struct KeyGroupExistanceTracker {
     /// Underlying prefix tracker
     tracker: PrefixTracker,
     /// Key prefix (e.g., "vec:")
@@ -65,10 +65,10 @@ pub struct VectorExistenceMap {
     unmapped_counter: AtomicU64,
 }
 
-impl VectorExistenceMap {
+impl KeyGroupExistanceTracker {
     /// Create a new vector existence map with given capacity
     ///
-    /// Uses 1 bit per vector ID, so 10M vectors uses ~1.25MB.
+    /// Uses 1 bit per key ID, so 10M keys uses ~1.25MB.
     pub fn new(prefix: &str, capacity: u64, is_cluster_mode: bool) -> Self {
         let config = TrackerConfig::simple(prefix)
             .with_max_id(capacity)
@@ -84,38 +84,38 @@ impl VectorExistenceMap {
         }
     }
 
-    /// Add a vector ID (mark as existing)
+    /// Add a key ID (mark as existing)
     ///
     /// The cluster_tag parameter is ignored for backward compatibility.
-    /// This function just marks the vector ID as existing.
+    /// This function just marks the key ID as existing.
     #[inline]
-    pub fn add_mapping(&self, vector_id: u64, _cluster_tag: &str) {
-        if vector_id >= self.capacity {
+    pub fn add_mapping(&self, key_id: u64, _cluster_tag: &str) {
+        if key_id >= self.capacity {
             return;
         }
 
         self.keys_scanned.fetch_add(1, Ordering::Relaxed);
-        self.tracker.add(vector_id);
+        self.tracker.add(key_id);
     }
 
-    /// Add a vector ID (simpler API)
+    /// Add a key ID (simpler API)
     #[inline]
-    pub fn add(&self, vector_id: u64) {
-        if vector_id < self.capacity {
-            self.tracker.add(vector_id);
+    pub fn add(&self, key_id: u64) {
+        if key_id < self.capacity {
+            self.tracker.add(key_id);
         }
     }
 
-    /// Check if a vector exists
+    /// Check if a key exists
     #[inline]
-    pub fn exists(&self, vector_id: u64) -> bool {
-        if vector_id >= self.capacity {
+    pub fn exists(&self, key_id: u64) -> bool {
+        if key_id >= self.capacity {
             return false;
         }
-        self.tracker.exists(vector_id)
+        self.tracker.exists(key_id)
     }
 
-    /// Get number of mapped vectors
+    /// Get number of mapped keys
     #[inline]
     pub fn count(&self) -> u64 {
         self.tracker.count()
@@ -789,7 +789,7 @@ pub fn parse_vector_key(key: &str, prefix: &str) -> Option<(u64, String)> {
 
 /// Build vector existence map by scanning cluster nodes
 pub fn build_vector_id_mappings(
-    tracker: &VectorExistenceMap,
+    tracker: &KeyGroupExistanceTracker,
     nodes: &[ClusterNode],
     config: &ClusterScanConfig,
 ) -> Result<ClusterScanResults, String> {
@@ -826,7 +826,7 @@ pub fn build_vector_id_mappings(
             let prefix = tracker.prefix.clone();
             let total_keys = Arc::clone(&total_keys);
             let errors = Arc::clone(&errors);
-            let tracker_ptr = tracker as *const VectorExistenceMap as usize;
+            let tracker_ptr = tracker as *const KeyGroupExistanceTracker as usize;
 
             thread::spawn(move || {
                 let result =
@@ -890,7 +890,7 @@ fn scan_node(
     prefix: &str,
     _worker_id: usize,
 ) -> Result<u64, String> {
-    let tracker = unsafe { &*(tracker_ptr as *const VectorExistenceMap) };
+    let tracker = unsafe { &*(tracker_ptr as *const KeyGroupExistanceTracker) };
 
     let mut conn = RawConnection::connect_tcp(host, port, timeout)
         .map_err(|e| format!("Connection failed: {}", e))?;
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn test_vector_existence_map_basic() {
-        let map = VectorExistenceMap::new("vec:", 1000, true);
+        let map = KeyGroupExistanceTracker::new("vec:", 1000, true);
 
         map.add(0);
         map.add(1);
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_vector_existence_map_claim_unmapped() {
-        let map = VectorExistenceMap::new("vec:", 10, true);
+        let map = KeyGroupExistanceTracker::new("vec:", 10, true);
 
         map.add(0);
         map.add(2);
@@ -991,7 +991,7 @@ mod tests {
     #[test]
     fn test_vector_existence_map_exhaustion() {
         // Test that claim_unmapped_id returns None after all IDs are claimed
-        let map = VectorExistenceMap::new("vec:", 5, true);
+        let map = KeyGroupExistanceTracker::new("vec:", 5, true);
 
         // Claim all 5 IDs
         assert_eq!(map.claim_unmapped_id(5), Some(0));
