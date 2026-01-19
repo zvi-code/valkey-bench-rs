@@ -1,0 +1,30 @@
+[package]
+name = "iterator_core"
+version = "0.1.0"
+edition = "2021"
+description = "Unified iterator traits and implementations for coordinate spaces, iteration strategies, and bitmap operations"
+license = "BSD-3-Clause"
+
+[dependencies]
+fastrand = "2.0"
+smallvec = "1.11"
+num-integer = "0.1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "core_benchmarks"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
