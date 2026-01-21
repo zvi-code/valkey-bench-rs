@@ -649,6 +649,6 @@ src/
 
 ## 14. See Also
 
-- [README.md](README.md) - User documentation and CLI reference
+- [README.md](../README.md) - User documentation and CLI reference
 - [EXAMPLES.md](EXAMPLES.md) - Comprehensive usage examples
-- [valkey-bench-rs-rust-LLD.md](valkey-bench-rs-rust-LLD.md) - Low-Level Design with implementation details
+- [valkey-bench-rs-LLD.md](valkey-bench-rs-LLD.md) - Low-Level Design with implementation details
