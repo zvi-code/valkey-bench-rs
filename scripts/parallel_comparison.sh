@@ -54,7 +54,7 @@ H1_RESULTS="/tmp/h1_results_${TIMESTAMP}.txt"
 H2_RESULTS="/tmp/h2_results_${TIMESTAMP}.txt"
 H1_LOG="/tmp/h1_benchmark_${TIMESTAMP}.log"
 H2_LOG="/tmp/h2_benchmark_${TIMESTAMP}.log"
-TABLE_OUTPUT="benchmark_comparison_parallel_${TIMESTAMP}.md"
+TABLE_OUTPUT="./resultsd/benchmark_comparison_parallel/res_${TIMESTAMP}.md"
 
 # Function to extract metrics from benchmark output
 extract_metrics() {
@@ -411,7 +411,7 @@ if [[ "$REGENERATE_MODE" == "true" ]]; then
     H2_RESULTS="/tmp/h2_results_${REGEN_TIMESTAMP}.txt"
     H1_LOG="/tmp/h1_benchmark_${REGEN_TIMESTAMP}.log"
     H2_LOG="/tmp/h2_benchmark_${REGEN_TIMESTAMP}.log"
-    TABLE_OUTPUT="benchmark_comparison_parallel_${REGEN_TIMESTAMP}_regen.md"
+    TABLE_OUTPUT="./results/benchmark_comparison_parallel/res_${REGEN_TIMESTAMP}_regen.md"
     
     # Verify files exist
     if [[ ! -f "$H1_RESULTS" ]]; then

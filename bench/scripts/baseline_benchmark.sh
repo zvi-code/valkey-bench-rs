@@ -17,7 +17,7 @@
 #
 # Options:
 #   --dataset <name>     Dataset to use (default: cohere-small-100k)
-#   --output <dir>       Output directory for results (default: ./baseline_results)
+#   --output <dir>       Output directory for results (default: ./results/baseline_results)
 #   --quick              Run quick benchmark (fewer requests)
 #   --full               Run full benchmark (more requests, longer duration)
 #   --skip-load          Skip vec-load phase (assume data already loaded)
@@ -43,7 +43,7 @@ CLI="$BENCHN --cli"
 
 # Default parameters
 DATASET="cohere-small-100k"
-OUTPUT_DIR="${BENCHMARK_HOME}/baseline_results"
+OUTPUT_DIR="${BENCHMARK_HOME}/results/baseline_results"
 QUICK_MODE=false
 FULL_MODE=false
 SKIP_LOAD=false
@@ -107,7 +107,7 @@ Usage:
 
 Options:
   --dataset <name>     Dataset to use (default: cohere-small-100k)
-  --output <dir>       Output directory for results (default: ./baseline_results)
+  --output <dir>       Output directory for results (default: ./results/baseline_results)
   --quick              Run quick benchmark (fewer requests, faster)
   --full               Run full benchmark (more requests, comprehensive)
   --skip-load          Skip vec-load phase (assume data already loaded)

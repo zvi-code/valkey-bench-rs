@@ -158,7 +158,7 @@ if [ ! -x "$BENCHN" ]; then
 fi
 
 # Create output dir
-OUTPUT_DIR="${BENCHMARK_HOME}/baseline_results"
+OUTPUT_DIR="${BENCHMARK_HOME}/results/baseline_results"
 mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 REPORT_FILE="${OUTPUT_DIR}/baseline_report_${TIMESTAMP}.txt"

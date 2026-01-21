@@ -41,7 +41,7 @@ Implement various keyspace iteration using https://github.com/zvi-code/keyspace_
 - **Base RTT Measurement**: Measures single-client PING and GET-miss latency to establish network baseline
 - **Custom Dataset Creation**: Python API (CommandRecorder) for creating benchmark datasets
 
-For comprehensive examples of all features, see [EXAMPLES.md](EXAMPLES.md).
+For comprehensive examples of all features, see [EXAMPLES.md](/docs/EXAMPLES.md).
 
 ## Supported Platforms
 

@@ -5,8 +5,8 @@ venv/
 *.log
 *.tmp
 ./datasets/raw/
-./keyspace_tracker/
 */target/*
 ./logs
 ./results
-
+*/__py*
+*logs

@@ -78,7 +78,7 @@ Options:
   --help               Show this help message
 
 Example:
-  HOST=localhost ./regression_test.sh --baseline baseline_results/baseline_cohere-small-100k_20241231.json
+  HOST=localhost ./regression_test.sh --baseline results/baseline_results/baseline_cohere-small-100k_20241231.json
 
 EOF
     exit 0
