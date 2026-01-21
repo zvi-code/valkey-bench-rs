@@ -94,6 +94,25 @@ pub fn create_index(
         }
     }
 
+    // Add TAG field if configured
+    let tag_field_bytes: Vec<u8>;
+    if let Some(ref tag_field) = config.tag_field {
+        tag_field_bytes = tag_field.as_bytes().to_vec();
+        args.push(&tag_field_bytes);
+        args.push(b"TAG");
+    }
+
+    // Add NUMERIC fields if configured
+    let numeric_field_names: Vec<Vec<u8>> = config
+        .numeric_fields
+        .iter()
+        .map(|f| f.name.as_bytes().to_vec())
+        .collect();
+    for name_bytes in &numeric_field_names {
+        args.push(name_bytes);
+        args.push(b"NUMERIC");
+    }
+
     encoder.encode_command(&args);
 
     // Execute
