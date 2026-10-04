@@ -44,6 +44,10 @@ pub struct BenchmarkConfig {
     pub clients: u32,
     pub threads: u32,
     pub pipeline: u32,
+    /// Commands sent on every benchmark connection after it connects
+    pub conn_setup: Vec<String>,
+    /// Requests sent as `ID <n> <command>`, replies matched by id (see --reply-ids)
+    pub reply_ids: bool,
 
     // Request generation
     /// Explicit request count from CLI (None = use default or dataset size)
@@ -177,6 +181,8 @@ impl BenchmarkConfig {
             clients: args.clients,
             threads,
             pipeline: args.pipeline,
+            conn_setup: args.conn_setup.clone(),
+            reply_ids: args.reply_ids,
 
             requests: args.requests,
             duration_secs: args.duration_secs,

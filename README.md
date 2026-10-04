@@ -34,6 +34,8 @@ Implement various keyspace iteration using https://github.com/zvi-code/keyspace_
 - **Iteration Strategies**: Sequential, random, subset, and zipfian key access patterns
 - **Addressable Spaces**: Hash field and JSON path iteration beyond simple keys
 - **Rate Limiting**: Token bucket rate limiter for controlled load testing
+- **Connection Setup**: `--conn-setup "<command>"` sends commands on every benchmark connection after it connects
+- **Out-of-Order Replies**: `--reply-ids` tags each request with an id and matches replies by id, keeping `-P` requests outstanding per connection and recording latency per request
 - **TLS Support**: Full TLS/SSL support with certificate authentication
 - **CLI Mode**: Interactive command-line interface (like valkey-cli)
 - **JSON Output**: Machine-readable results for CI/CD integration
