@@ -6,7 +6,7 @@
 //! - Multiple clients multiplexed on single thread
 //! - Write when writable, read when readable
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::io::AsRawFd;
@@ -78,7 +78,7 @@ impl RecallStats {
     }
 }
 
-use crate::client::{CommandBuffer, PlaceholderType};
+use crate::client::{CommandBuffer, PlaceholderOffset, PlaceholderType};
 use crate::cluster::ClusterTopology;
 use crate::config::BenchmarkConfig;
 use crate::utils::RespValue;
@@ -149,6 +149,12 @@ struct EventClient {
     /// Slots owned by this client's node (for cluster tag routing)
     /// Index is slot number (0-16383), value is true if owned
     owned_slots: Option<Box<[bool; 16384]>>,
+    /// --reply-ids: when each outstanding request was queued, by id
+    outstanding: HashMap<u64, Instant>,
+    /// --reply-ids: id of the next request
+    next_id: u64,
+    /// --reply-ids: scratch space for building one command
+    command_buf: Vec<u8>,
 }
 
 impl EventClient {
@@ -168,6 +174,9 @@ impl EventClient {
             inflight_indices: VecDeque::with_capacity(pipeline),
             query_indices: VecDeque::with_capacity(pipeline),
             owned_slots: None,
+            outstanding: HashMap::new(),
+            next_id: 0,
+            command_buf: Vec::new(),
         }
     }
 
@@ -574,6 +583,8 @@ pub struct EventWorker {
     global_ready_queue: VecDeque<usize>,
     /// Rate limiter (optional, for --rps flag)
     rate_limiter: Option<TokenBucket>,
+    /// --reply-ids: requests tagged with ids, replies matched by id
+    reply_ids: bool,
 }
 
 impl EventWorker {
@@ -657,7 +668,10 @@ impl EventWorker {
 
             for _ in 0..clients_per_addr {
                 let addr = format!("{}:{}", host, port);
-                let std_stream = std::net::TcpStream::connect(&addr)?;
+                let mut std_stream = std::net::TcpStream::connect(&addr)?;
+                for command in &config.conn_setup {
+                    run_setup_command(&mut std_stream, command)?;
+                }
                 std_stream.set_nonblocking(true)?;
                 std_stream.set_nodelay(true)?;
 
@@ -737,6 +751,7 @@ impl EventWorker {
             node_ready_queues,
             global_ready_queue,
             rate_limiter,
+            reply_ids: config.reply_ids,
         })
     }
 
@@ -893,114 +908,54 @@ impl EventWorker {
         false
     }
 
-    /// Fill placeholders with a pre-determined key (for slot-aware routing)
+    /// Fill the placeholders of every command in a client's batch. The first
+    /// command gets `key_num`; each further command claims a key of its own.
     fn fill_placeholders_with_key(
         &mut self,
         client_idx: usize,
         key_num: u64,
-        _counters: &GlobalCounters,
+        counters: &GlobalCounters,
     ) {
         // Select template: random weighted selection for parallel mode, primary for single
-        let template = if self.templates.is_parallel() {
+        let template_idx = if self.templates.is_parallel() {
             let random = self.rng.f64();
-            let idx = self.templates.select_index(random);
-            let selected = self.templates.get(idx);
-            // Copy selected template bytes into write buffer (different commands have different structures)
-            let buf = &mut self.clients[client_idx].write_buf;
-            if buf.len() != selected.bytes.len() {
-                buf.resize(selected.bytes.len(), 0);
-            }
-            buf.copy_from_slice(&selected.bytes);
-            selected
+            self.templates.select_index(random)
         } else {
-            self.templates.primary()
+            0
         };
-        for (cmd_idx, phs) in template.placeholders.iter().enumerate() {
-            for ph in phs {
-                let offset = template.absolute_offset(cmd_idx, ph.offset);
-                match ph.placeholder_type {
-                    PlaceholderType::Key => {
-                        // For VecDelete: key is directly the claimed ID
-                        // For dataset workloads: key is set by Vector handler
-                        // For simple workloads: key is the key_num
-                        if self.workload_ctx.key_is_claimed_id() {
-                            write_fixed_width_u64(&mut self.clients[client_idx].write_buf, offset, key_num, ph.len);
-                        } else if self.workload_ctx.uses_dataset_keys() {
-                            continue; // Key will be set by Vector handler
-                        } else {
-                            write_fixed_width_u64(&mut self.clients[client_idx].write_buf, offset, key_num, ph.len);
-                        }
-                    }
-                    PlaceholderType::Vector => {
-                        // Use key_num as the vector index - it was already claimed via claim_next_id
-                        if let Some(vec_bytes) = self.workload_ctx.get_vector_bytes(key_num) {
-                            self.clients[client_idx].write_buf[offset..offset + vec_bytes.len()]
-                                .copy_from_slice(vec_bytes);
-                            // Also set the Key placeholder with the vector ID
-                            for ph2 in phs {
-                                if matches!(ph2.placeholder_type, PlaceholderType::Key) {
-                                    let key_offset = template.absolute_offset(cmd_idx, ph2.offset);
-                                    write_fixed_width_u64(&mut self.clients[client_idx].write_buf, key_offset, key_num, ph2.len);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    PlaceholderType::QueryVector => {
-                        let num_queries = self.workload_ctx.num_queries();
-                        if num_queries > 0 {
-                            let idx = self.rng.u64(0..num_queries);
-                            if let Some(vec_bytes) = self.workload_ctx.get_query_bytes(idx) {
-                                self.clients[client_idx].write_buf[offset..offset + vec_bytes.len()]
-                                    .copy_from_slice(vec_bytes);
-                                self.clients[client_idx].query_indices.push_back(idx);
-                            }
-                        }
-                    }
-                    PlaceholderType::RandInt => {
-                        let value = self.rng.u64(..);
-                        write_fixed_width_u64(&mut self.clients[client_idx].write_buf, offset, value, ph.len);
-                    }
-                    PlaceholderType::ClusterTag => {
-                        // Generate deterministic cluster tag from key_num
-                        let tag = Self::deterministic_cluster_tag(
-                            self.seed,
-                            key_num,
-                            |slot| self.clients[client_idx].owns_slot(slot),
-                        );
-                        self.clients[client_idx].write_buf[offset..offset + 5].copy_from_slice(&tag);
-                    }
-                    PlaceholderType::Tag => {
-                        // Delegate tag generation to workload context
-                        let buf = &mut self.clients[client_idx].write_buf[offset..offset + ph.len];
-                        self.workload_ctx.fill_tag_placeholder(key_num, buf);
-                    }
-                    PlaceholderType::Numeric => {
-                        write_fixed_width_u64(
-                            &mut self.clients[client_idx].write_buf,
-                            offset,
-                            key_num,
-                            ph.len,
-                        );
-                    }
-                    PlaceholderType::NumericField(field_idx) => {
-                        // Delegate numeric field generation to workload context
-                        let buf = &mut self.clients[client_idx].write_buf[offset..offset + ph.len];
-                        // Use key_num as both key-based seed and seq_counter for now
-                        self.workload_ctx.fill_numeric_field(field_idx, key_num, key_num, buf);
-                    }
-                    PlaceholderType::Field => {
-                        // Delegate field name filling to workload context (for hash field iteration)
-                        let buf = &mut self.clients[client_idx].write_buf[offset..offset + ph.len];
-                        self.workload_ctx.fill_field_placeholder(buf);
-                    }
-                    PlaceholderType::JsonPath => {
-                        // Delegate JSON path filling to workload context (for JSON path iteration)
-                        let buf = &mut self.clients[client_idx].write_buf[offset..offset + ph.len];
-                        self.workload_ctx.fill_json_path_placeholder(buf);
-                    }
-                }
+        let template = self.templates.get(template_idx);
+        let client = &mut self.clients[client_idx];
+        if self.templates.is_parallel() {
+            // Copy selected template bytes into write buffer (different commands have different structures)
+            if client.write_buf.len() != template.bytes.len() {
+                client.write_buf.resize(template.bytes.len(), 0);
             }
+            client.write_buf.copy_from_slice(&template.bytes);
+        }
+        let EventClient {
+            write_buf,
+            owned_slots,
+            query_indices,
+            ..
+        } = client;
+        let owns_slot = |slot: u16| owned_slots.as_ref().map_or(true, |b| b[slot as usize]);
+        for (cmd_idx, phs) in template.placeholders.iter().enumerate() {
+            let key = if cmd_idx == 0 {
+                key_num
+            } else {
+                self.workload_ctx.claim_next_id(counters).unwrap_or(key_num)
+            };
+            fill_command(
+                write_buf,
+                template.absolute_offset(cmd_idx, 0),
+                phs,
+                key,
+                &*self.workload_ctx,
+                &mut self.rng,
+                self.seed,
+                &owns_slot,
+                query_indices,
+            );
         }
     }
 
@@ -1042,8 +997,12 @@ impl EventWorker {
 
     /// Apply rate limiting if configured
     fn apply_rate_limit(&mut self) {
+        self.apply_rate_limit_for(self.pipeline as u32);
+    }
+
+    fn apply_rate_limit_for(&mut self, requests: u32) {
         if let Some(ref mut limiter) = self.rate_limiter {
-            if let Some(wait) = limiter.acquire(self.pipeline as u32) {
+            if let Some(wait) = limiter.acquire(requests) {
                 std::thread::sleep(wait);
             }
         }
@@ -1054,6 +1013,9 @@ impl EventWorker {
         mut self,
         counters: Arc<GlobalCounters>,
     ) -> EventWorkerResult {
+        if self.reply_ids {
+            return self.run_with_reply_ids(counters);
+        }
         let batch_size = self.pipeline as u64;
         let slot_aware = self.needs_slot_routing();
 
@@ -1250,6 +1212,225 @@ impl EventWorker {
         }
     }
 
+    /// --reply-ids: queue one request as `ID <n> <command>` on a client.
+    /// Returns false when there is no more work.
+    fn queue_tagged_request(&mut self, client_idx: usize, counters: &GlobalCounters) -> bool {
+        let key_num = match self.workload_ctx.claim_next_id(counters) {
+            Some(id) => id,
+            None => return false,
+        };
+        let template_idx = if self.templates.is_parallel() {
+            let random = self.rng.f64();
+            self.templates.select_index(random)
+        } else {
+            0
+        };
+        let template = self.templates.get(template_idx);
+        let EventClient {
+            write_buf,
+            owned_slots,
+            query_indices,
+            outstanding,
+            next_id,
+            command_buf,
+            ..
+        } = &mut self.clients[client_idx];
+        // One command of the template, filled in place.
+        command_buf.clear();
+        command_buf.extend_from_slice(&template.bytes[..template.command_len]);
+        let owns_slot = |slot: u16| owned_slots.as_ref().map_or(true, |b| b[slot as usize]);
+        if let Some(phs) = template.placeholders.first() {
+            fill_command(
+                command_buf,
+                0,
+                phs,
+                key_num,
+                &*self.workload_ctx,
+                &mut self.rng,
+                self.seed,
+                &owns_slot,
+                query_indices,
+            );
+        }
+        query_indices.clear(); // recall is not computed in this mode
+        // "*<argc>\r\n<args>" becomes "*<argc + 2>\r\n$2\r\nID\r\n$<len>\r\n<id>\r\n<args>"
+        let header_end = match find_crlf(command_buf) {
+            Some(pos) => pos,
+            None => return false,
+        };
+        let argc: usize = std::str::from_utf8(&command_buf[1..header_end])
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        let id = *next_id;
+        *next_id += 1;
+        let id_text = id.to_string();
+        write!(
+            write_buf,
+            "*{}\r\n$2\r\nID\r\n${}\r\n{}\r\n",
+            argc + 2,
+            id_text.len(),
+            id_text
+        )
+        .ok();
+        write_buf.extend_from_slice(&command_buf[header_end + 2..]);
+        outstanding.insert(id, Instant::now());
+        true
+    }
+
+    /// --reply-ids: keep each client's window of outstanding requests full.
+    fn fill_window(&mut self, client_idx: usize, counters: &GlobalCounters) {
+        while self.clients[client_idx].outstanding.len() < self.pipeline {
+            if counters.claim_batch(1).is_none() {
+                return;
+            }
+            self.apply_rate_limit_for(1);
+            if !self.queue_tagged_request(client_idx, counters) {
+                return;
+            }
+        }
+    }
+
+    /// --reply-ids: send what is queued. Returns false on a connection error.
+    fn flush_client(&mut self, client_idx: usize) -> bool {
+        let client = &mut self.clients[client_idx];
+        while client.write_pos < client.write_buf.len() {
+            match client.stream.write(&client.write_buf[client.write_pos..]) {
+                Ok(0) => return false,
+                Ok(n) => client.write_pos += n,
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => return true,
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => return false,
+            }
+        }
+        client.write_buf.clear();
+        client.write_pos = 0;
+        true
+    }
+
+    /// --reply-ids: read and match replies. Returns false on a connection error.
+    fn read_tagged_replies(&mut self, client_idx: usize, counters: &GlobalCounters) -> bool {
+        let client = &mut self.clients[client_idx];
+        loop {
+            if client.read_pos >= client.read_buf.len() {
+                let len = client.read_buf.len();
+                client.read_buf.resize(len * 2, 0);
+            }
+            match client.stream.read(&mut client.read_buf[client.read_pos..]) {
+                Ok(0) => return false,
+                Ok(n) => client.read_pos += n,
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => return false,
+            }
+        }
+        let mut pos = 0;
+        let mut finished = 0u64;
+        while pos < client.read_pos {
+            match parse_resp_value(&client.read_buf[pos..client.read_pos]) {
+                Ok((value, consumed)) => {
+                    pos += consumed;
+                    // [id, reply]
+                    let (id, reply) = match value {
+                        RespValue::Array(mut parts) if parts.len() == 2 => {
+                            let reply = parts.pop();
+                            let id = match parts.pop() {
+                                Some(RespValue::BulkString(b)) => {
+                                    std::str::from_utf8(&b).ok().and_then(|t| t.parse::<u64>().ok())
+                                }
+                                _ => None,
+                            };
+                            (id, reply)
+                        }
+                        _ => (None, None),
+                    };
+                    let started = id.and_then(|id| client.outstanding.remove(&id));
+                    match started {
+                        Some(t) => {
+                            self.histogram.record(t.elapsed().as_micros() as u64).ok();
+                            if matches!(reply, Some(RespValue::Error(_))) {
+                                self.error_count += 1;
+                            }
+                            finished += 1;
+                        }
+                        None => self.error_count += 1, // not a reply to a tagged request
+                    }
+                }
+                Err(ParseError::Incomplete) => break,
+                Err(ParseError::Invalid(_)) => return false,
+            }
+        }
+        if pos > 0 {
+            client.read_buf.copy_within(pos..client.read_pos, 0);
+            client.read_pos -= pos;
+        }
+        self.requests_processed += finished;
+        counters.record_finished(finished);
+        true
+    }
+
+    /// --reply-ids: the event loop. Each client keeps --pipeline requests
+    /// outstanding and sends a new one as each reply arrives.
+    fn run_with_reply_ids(mut self, counters: Arc<GlobalCounters>) -> EventWorkerResult {
+        for client_idx in 0..self.clients.len() {
+            // The write buffer starts out holding the batch template; here it is
+            // a queue of tagged requests instead.
+            self.clients[client_idx].write_buf.clear();
+            self.clients[client_idx].write_pos = 0;
+            self.fill_window(client_idx, &counters);
+            if !self.flush_client(client_idx) {
+                self.drop_client_requests(client_idx);
+            }
+        }
+        loop {
+            if counters.is_shutdown() || counters.is_duration_exceeded() {
+                break;
+            }
+            if counters.is_complete() && self.clients.iter().all(|c| c.outstanding.is_empty()) {
+                break;
+            }
+            if self
+                .poll
+                .poll(&mut self.events, Some(Duration::from_micros(100)))
+                .is_err()
+            {
+                continue;
+            }
+            for client_idx in 0..self.clients.len() {
+                if !self.flush_client(client_idx) || !self.read_tagged_replies(client_idx, &counters) {
+                    self.drop_client_requests(client_idx);
+                    continue;
+                }
+                self.fill_window(client_idx, &counters);
+                if !self.flush_client(client_idx) {
+                    self.drop_client_requests(client_idx);
+                }
+            }
+        }
+        let recall_stats = match self.workload_ctx.take_metrics() {
+            WorkloadMetrics::Recall(stats) => stats,
+            WorkloadMetrics::None => RecallStats::new(),
+        };
+        EventWorkerResult {
+            worker_id: self.id,
+            histogram: self.histogram,
+            recall_stats,
+            redirect_count: 0,
+            topology_refresh_count: 0,
+            error_count: self.error_count,
+            requests_processed: self.requests_processed,
+        }
+    }
+
+    /// --reply-ids: count a failed connection's outstanding requests as errors.
+    fn drop_client_requests(&mut self, client_idx: usize) {
+        let client = &mut self.clients[client_idx];
+        self.error_count += client.outstanding.len() as u64;
+        client.outstanding.clear();
+        client.write_buf.clear();
+        client.write_pos = 0;
+    }
+
     /// Fill placeholders for a specific client by index
     fn fill_placeholders_for(
         &mut self,
@@ -1264,6 +1445,114 @@ impl EventWorker {
 
         // Delegate to the unified implementation
         self.fill_placeholders_with_key(client_idx, key_num, counters);
+    }
+}
+
+/// Send one setup command on a fresh (blocking) connection and wait for a
+/// reply that is not an error.
+fn run_setup_command(stream: &mut TcpStream, command: &str) -> io::Result<()> {
+    let args: Vec<&str> = command.split_whitespace().collect();
+    if args.is_empty() {
+        return Ok(());
+    }
+    let mut buf = Vec::new();
+    write!(buf, "*{}\r\n", args.len())?;
+    for arg in &args {
+        write!(buf, "${}\r\n{}\r\n", arg.len(), arg)?;
+    }
+    stream.write_all(&buf)?;
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            return Err(io::Error::new(ErrorKind::UnexpectedEof, "connection closed during setup"));
+        }
+        reply.extend_from_slice(&chunk[..n]);
+        match parse_resp_value(&reply) {
+            Ok((RespValue::Error(e), _)) => {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    format!("setup command '{}' failed: {}", command, e),
+                ))
+            }
+            Ok(_) => return Ok(()),
+            Err(ParseError::Incomplete) => continue,
+            Err(ParseError::Invalid(msg)) => return Err(io::Error::new(ErrorKind::InvalidData, msg)),
+        }
+    }
+}
+
+/// Fill one command's placeholders; `base` is where the command starts in `buf`.
+#[allow(clippy::too_many_arguments)]
+fn fill_command(
+    buf: &mut [u8],
+    base: usize,
+    phs: &[PlaceholderOffset],
+    key_num: u64,
+    workload_ctx: &dyn WorkloadContext,
+    rng: &mut fastrand::Rng,
+    seed: u64,
+    owns_slot: &dyn Fn(u16) -> bool,
+    query_indices: &mut VecDeque<u64>,
+) {
+    for ph in phs {
+        let offset = base + ph.offset;
+        match ph.placeholder_type {
+            PlaceholderType::Key => {
+                // For VecDelete: key is directly the claimed ID
+                // For dataset workloads: key is set by the Vector handler
+                // For simple workloads: key is the key_num
+                if workload_ctx.key_is_claimed_id() || !workload_ctx.uses_dataset_keys() {
+                    write_fixed_width_u64(buf, offset, key_num, ph.len);
+                }
+            }
+            PlaceholderType::Vector => {
+                // key_num is the vector index - it was already claimed via claim_next_id
+                if let Some(vec_bytes) = workload_ctx.get_vector_bytes(key_num) {
+                    buf[offset..offset + vec_bytes.len()].copy_from_slice(vec_bytes);
+                    // Also set the Key placeholder with the vector ID
+                    if let Some(ph2) = phs.iter().find(|p| matches!(p.placeholder_type, PlaceholderType::Key)) {
+                        write_fixed_width_u64(buf, base + ph2.offset, key_num, ph2.len);
+                    }
+                }
+            }
+            PlaceholderType::QueryVector => {
+                let num_queries = workload_ctx.num_queries();
+                if num_queries > 0 {
+                    let idx = rng.u64(0..num_queries);
+                    if let Some(vec_bytes) = workload_ctx.get_query_bytes(idx) {
+                        buf[offset..offset + vec_bytes.len()].copy_from_slice(vec_bytes);
+                        query_indices.push_back(idx);
+                    }
+                }
+            }
+            PlaceholderType::RandInt => {
+                let value = rng.u64(..);
+                write_fixed_width_u64(buf, offset, value, ph.len);
+            }
+            PlaceholderType::ClusterTag => {
+                // Deterministic cluster tag from key_num
+                let tag = EventWorker::deterministic_cluster_tag(seed, key_num, |slot| owns_slot(slot));
+                buf[offset..offset + 5].copy_from_slice(&tag);
+            }
+            PlaceholderType::Tag => {
+                workload_ctx.fill_tag_placeholder(key_num, &mut buf[offset..offset + ph.len]);
+            }
+            PlaceholderType::Numeric => {
+                write_fixed_width_u64(buf, offset, key_num, ph.len);
+            }
+            PlaceholderType::NumericField(field_idx) => {
+                // Use key_num as both key-based seed and seq_counter for now
+                workload_ctx.fill_numeric_field(field_idx, key_num, key_num, &mut buf[offset..offset + ph.len]);
+            }
+            PlaceholderType::Field => {
+                workload_ctx.fill_field_placeholder(&mut buf[offset..offset + ph.len]);
+            }
+            PlaceholderType::JsonPath => {
+                workload_ctx.fill_json_path_placeholder(&mut buf[offset..offset + ph.len]);
+            }
+        }
     }
 }
 

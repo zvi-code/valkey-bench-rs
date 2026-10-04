@@ -98,6 +98,18 @@ pub struct CliArgs {
     #[arg(short = 'P', long = "pipeline", default_value_t = 1)]
     pub pipeline: u32,
 
+    /// Command sent on every benchmark connection right after it connects
+    /// (repeatable; arguments separated by spaces), e.g. --conn-setup "WRITES ACCEPTED"
+    #[arg(long = "conn-setup")]
+    pub conn_setup: Vec<String>,
+
+    /// Send each request as `ID <n> <command>` and match replies `[n, reply]`
+    /// by id, for servers that may answer out of order. Each connection keeps
+    /// --pipeline requests outstanding, sends a new one as each reply arrives,
+    /// and records latency per request.
+    #[arg(long = "reply-ids")]
+    pub reply_ids: bool,
+
     // ===== Key Generation =====
     /// Size of key/value data in bytes
     #[arg(short = 'd', long = "data-size", default_value_t = 3)]

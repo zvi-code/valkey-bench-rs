@@ -243,6 +243,31 @@ rec.generate("datasets/vectors")
 
 ---
 
+## Connection Setup and Out-of-Order Replies
+
+`--conn-setup` sends a command on every benchmark connection right after it
+connects (repeatable; arguments are separated by spaces). A reply that is an
+error stops the run.
+
+`--reply-ids` is for servers that can answer requests out of order. Each
+request is sent as `ID <n> <command>` and the server replies `[n, reply]`.
+Instead of sending a batch of `-P` requests and waiting for all of them, each
+connection keeps `-P` requests outstanding and sends a new one as each reply
+arrives. Latency is recorded per request, from when it was queued to when its
+own reply arrived.
+
+```bash
+# Writes acknowledged when the server has accepted them
+./target/release/valkey-bench-rs -p 7700 -t set -d 4096 -r 1000000 -n 2000000 -P 16 \
+    --conn-setup "WRITES ACCEPTED"
+
+# Replies as soon as each result is ready, matched by id
+./target/release/valkey-bench-rs -p 7700 -t get -d 4096 -r 1000000 -n 2000000 -P 16 \
+    --reply-ids --conn-setup "REPLIES READY"
+```
+
+Recall is not computed with `--reply-ids`.
+
 ## Parallel Workloads (Mixed Traffic)
 
 The `--parallel` flag enables running multiple workload types simultaneously with weighted traffic distribution. This is useful for simulating real-world mixed read/write patterns.
